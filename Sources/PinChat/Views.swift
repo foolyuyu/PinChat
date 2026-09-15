@@ -15,29 +15,39 @@ struct PetRootView: View {
     }
 
     var body: some View {
-        ZStack(alignment: .bottomLeading) {
-            Color.clear
+        VStack(spacing: 3) {
             PetSpriteView(store: controller.spriteStore, animation: animation)
-                .frame(width: 98, height: 106)
-                .position(x: 77, y: 57)
+                .frame(
+                    width: PinChatVisualMetrics.petArtworkSize.width,
+                    height: PinChatVisualMetrics.petArtworkSize.height
+                )
                 .contentShape(Rectangle())
                 .onTapGesture { controller.toggleComposer() }
                 .gesture(
-                    DragGesture(minimumDistance: 3)
+                    DragGesture(minimumDistance: 2)
                         .onChanged { _ in controller.movePet(to: NSEvent.mouseLocation) }
                         .onEnded { _ in controller.finishPetDrag() }
                 )
 
-            FloatingCircleButton(
-                systemName: "square.and.pencil",
-                help: "开始提问",
-                size: 40,
-                action: controller.toggleComposer
-            )
-            .padding(.leading, 3)
-            .padding(.bottom, 3)
+            if controller.isPetLauncherVisible {
+                PetLauncherButton(action: controller.showComposer)
+                    .transition(.opacity.combined(with: .scale(scale: 0.92)))
+            } else {
+                Color.clear
+                    .frame(
+                        width: PinChatVisualMetrics.petLauncherSize,
+                        height: PinChatVisualMetrics.petLauncherSize
+                    )
+                    .allowsHitTesting(false)
+            }
         }
-        .frame(width: 140, height: 144)
+        .padding(.top, 3)
+        .frame(
+            width: PinChatVisualMetrics.petSize.width,
+            height: PinChatVisualMetrics.petSize.height,
+            alignment: .top
+        )
+        .animation(.easeOut(duration: 0.12), value: controller.isPetLauncherVisible)
         .accessibilityElement(children: .contain)
     }
 }
@@ -49,13 +59,16 @@ struct MiniComposerView: View {
     @FocusState private var focused: Bool
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             Circle()
                 .fill(Color.primary.opacity(0.055))
-                .frame(width: 40, height: 40)
+                .frame(
+                    width: PinChatVisualMetrics.composerActionSize,
+                    height: PinChatVisualMetrics.composerActionSize
+                )
                 .overlay {
                     Image(systemName: model.account == nil ? "person.crop.circle" : "plus")
-                        .font(.system(size: 18, weight: .regular))
+                        .font(.system(size: 13, weight: .regular))
                         .foregroundStyle(.primary)
                 }
                 .onTapGesture {
@@ -65,7 +78,7 @@ struct MiniComposerView: View {
 
             TextField(placeholder, text: $draft, axis: .vertical)
                 .textFieldStyle(.plain)
-                .font(.system(size: 17, weight: .regular))
+                .font(.system(size: 15, weight: .regular))
                 .lineLimit(1...2)
                 .focused($focused)
                 .disabled(model.account == nil || model.isGenerating)
@@ -81,6 +94,7 @@ struct MiniComposerView: View {
                     tint: .primary.opacity(0.10),
                     foreground: .primary,
                     help: "停止生成",
+                    size: PinChatVisualMetrics.composerActionSize,
                     action: model.stopGenerating
                 )
             } else {
@@ -89,20 +103,20 @@ struct MiniComposerView: View {
                     tint: Color(red: 0.59, green: 0.74, blue: 1.0),
                     foreground: .white,
                     help: "发送",
-                    size: 40,
+                    size: PinChatVisualMetrics.composerActionSize,
                     action: send
                 )
                 .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 .opacity(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.62 : 1)
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(.regularMaterial, in: Capsule())
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(.thinMaterial, in: Capsule())
         .overlay {
-            Capsule().strokeBorder(Color.white.opacity(0.58), lineWidth: 1)
+            Capsule().strokeBorder(Color.primary.opacity(0.09), lineWidth: 0.75)
         }
-        .shadow(color: .black.opacity(0.14), radius: 8, y: 3)
+        .shadow(color: .black.opacity(0.14), radius: 10, y: 4)
         .padding(4)
         .onAppear { focusSoon() }
         .onChange(of: controller.isComposerVisible) {
@@ -142,15 +156,15 @@ struct TaskStatusCard: View {
     }
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             statusGlyph
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(title)
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(.system(size: 14.5, weight: .semibold))
                     .lineLimit(1)
                 Text(detail)
-                    .font(.system(size: 14))
+                    .font(.system(size: 12.5))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
@@ -203,14 +217,14 @@ struct TaskStatusCard: View {
                 )
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 23, style: .continuous))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 11)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 23, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.52), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.75)
         }
-        .shadow(color: .black.opacity(0.13), radius: 9, y: 4)
+        .shadow(color: .black.opacity(0.12), radius: 9, y: 4)
         .padding(4)
         .animation(.spring(response: 0.34, dampingFraction: 0.82), value: model.isGenerating)
     }
@@ -220,18 +234,18 @@ struct TaskStatusCard: View {
         if model.isGenerating {
             ProgressView()
                 .controlSize(.small)
-                .frame(width: 28, height: 28)
+                .frame(width: 24, height: 24)
         } else if isFailed {
             Image(systemName: "exclamationmark")
-                .font(.system(size: 16, weight: .bold))
+                .font(.system(size: 13, weight: .bold))
                 .foregroundStyle(.red)
-                .frame(width: 28, height: 28)
+                .frame(width: 24, height: 24)
                 .background(Color.red.opacity(0.12), in: Circle())
         } else {
             Image(systemName: "sparkles")
-                .font(.system(size: 15, weight: .semibold))
+                .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(Color.accentColor)
-                .frame(width: 28, height: 28)
+                .frame(width: 24, height: 24)
                 .background(Color.accentColor.opacity(0.11), in: Circle())
         }
     }
@@ -328,7 +342,7 @@ struct AnswerPanelView: View {
                     tint: .primary.opacity(0.09),
                     foreground: .primary,
                     help: "停止生成",
-                    size: 34,
+                    size: PinChatVisualMetrics.followUpActionSize,
                     action: model.stopGenerating
                 )
             } else {
@@ -337,7 +351,7 @@ struct AnswerPanelView: View {
                     tint: Color.accentColor,
                     foreground: .white,
                     help: "发送追问",
-                    size: 34,
+                    size: PinChatVisualMetrics.followUpActionSize,
                     action: send
                 )
                 .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -443,25 +457,32 @@ private struct MessageBubble: View {
     }
 }
 
-private struct FloatingCircleButton: View {
-    let systemName: String
-    let help: String
-    var size: CGFloat = 46
+private struct PetLauncherButton: View {
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: systemName)
-                .font(.system(size: size * 0.43, weight: .medium))
+            Image(systemName: "square.and.pencil")
+                .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(.primary)
-                .frame(width: size, height: size)
-                .background(.regularMaterial, in: Circle())
-                .overlay { Circle().strokeBorder(Color.white.opacity(0.60), lineWidth: 1) }
-                .shadow(color: .black.opacity(0.16), radius: 8, y: 3)
+                .frame(
+                    width: PinChatVisualMetrics.petLauncherSize,
+                    height: PinChatVisualMetrics.petLauncherSize
+                )
+                .background(
+                    .regularMaterial,
+                    in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(Color.primary.opacity(0.09), lineWidth: 0.75)
+                }
+                .shadow(color: .black.opacity(0.13), radius: 7, y: 3)
         }
         .buttonStyle(.plain)
-        .help(help)
-        .accessibilityLabel(help)
+        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .help("开始提问")
+        .accessibilityLabel("开始提问")
     }
 }
 
@@ -470,13 +491,13 @@ private struct ActionCircleButton: View {
     let tint: Color
     let foreground: Color
     let help: String
-    var size: CGFloat = 40
+    var size: CGFloat = PinChatVisualMetrics.statusActionSize
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             Image(systemName: systemName)
-                .font(.system(size: size * 0.40, weight: .medium))
+                .font(.system(size: size * 0.39, weight: .medium))
                 .foregroundStyle(foreground)
                 .frame(width: size, height: size)
                 .background(tint, in: Circle())
@@ -491,13 +512,14 @@ private struct ActionCircleButton: View {
 private struct ToolbarIcon: View {
     let systemName: String
     let help: String
+    var size: CGFloat = PinChatVisualMetrics.answerToolbarActionSize
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             Image(systemName: systemName)
-                .font(.system(size: 14, weight: .medium))
-                .frame(width: 28, height: 28)
+                .font(.system(size: 12, weight: .medium))
+                .frame(width: size, height: size)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

@@ -13,3 +13,4 @@ Release/*.zip
 .idea/
 *.swp
 *.tmp
+work/

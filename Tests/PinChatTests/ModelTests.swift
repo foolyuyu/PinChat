@@ -84,6 +84,22 @@ import Testing
     #expect(behavior.contains(.stationary))
 }
 
+@Test func visualMetricsRemainSmallerThanOfficialPetReference() {
+    #expect(PinChatVisualMetrics.petArtworkSize.width == 52)
+    #expect(PinChatVisualMetrics.petArtworkSize.width < 60)
+    #expect(PinChatVisualMetrics.petSize == NSSize(width: 96, height: 96))
+    #expect(PinChatVisualMetrics.petLauncherSize == 28)
+    #expect(PinChatVisualMetrics.composerActionSize == 30)
+    #expect(PinChatVisualMetrics.statusActionSize == 28)
+    #expect(PinChatVisualMetrics.answerToolbarActionSize == 24)
+}
+
+@Test func compactPanelsMatchFrozenV21Targets() {
+    #expect(PinChatVisualMetrics.composerSize == NSSize(width: 360, height: 50))
+    #expect(PinChatVisualMetrics.statusSize == NSSize(width: 410, height: 66))
+    #expect(PinChatVisualMetrics.attachmentGap == 3)
+}
+
 @Test func floatingButtonSnapsToNearestScreenEdge() {
     let screen = NSRect(x: 0, y: 0, width: 1200, height: 800)
     let left = WindowPlacement.snappedFloatingButton(

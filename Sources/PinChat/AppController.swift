@@ -120,6 +120,21 @@ enum PanelPresentationPolicy {
     ]
 }
 
+enum PinChatVisualMetrics {
+    static let petSize = NSSize(width: 96, height: 96)
+    static let petArtworkSize = NSSize(width: 52, height: 56)
+    static let petLauncherSize: CGFloat = 28
+    static let composerSize = NSSize(width: 360, height: 50)
+    static let composerActionSize: CGFloat = 30
+    static let statusSize = NSSize(width: 410, height: 66)
+    static let statusActionSize: CGFloat = 28
+    static let answerSize = NSSize(width: 520, height: 420)
+    static let answerToolbarActionSize: CGFloat = 24
+    static let followUpActionSize: CGFloat = 30
+    static let attachmentGap: CGFloat = 3
+    static let launcherOverlap: CGFloat = 32
+}
+
 final class ChatPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
@@ -149,6 +164,9 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
     @Published private(set) var expansionDirection: AttachmentDirection = .below
 
     var answerDetached: Bool { answerAttachment == .detached }
+    var isPetLauncherVisible: Bool {
+        !isComposerVisible && !isStatusVisible && !isAnswerVisible
+    }
 
     let model = AppModel()
     let spriteStore = PetSpriteStore()
@@ -169,18 +187,11 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
     private enum Keys {
         static let alwaysOnTop = "alwaysOnTop"
         static let floatingButtonEnabled = "floatingButtonEnabled"
-        static let petFrame = "petFrameV2"
+        static let petFrame = "petFrameV21"
+        static let legacyPetFrameV2 = "petFrameV2"
         static let legacyFloatingButtonFrame = "floatingButtonFrame"
         static let answerFrame = "answerFrameV2"
         static let hasLaunchedV2 = "hasLaunchedV2"
-    }
-
-    private enum Metrics {
-        static let petSize = NSSize(width: 140, height: 144)
-        static let composerSize = NSSize(width: 450, height: 66)
-        static let statusSize = NSSize(width: 470, height: 82)
-        static let answerSize = NSSize(width: 520, height: 420)
-        static let gap: CGFloat = 7
     }
 
     private override init() {
@@ -270,13 +281,13 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
         guard let panel = composerPanel, panel.isVisible else { return }
         let original = panel.frame
         let collapsed = NSRect(
-            x: original.midX - 24,
+            x: original.midX - 18,
             y: original.minY,
-            width: 48,
+            width: 36,
             height: original.height
         )
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.15
+            context.duration = 0.13
             context.timingFunction = CAMediaTimingFunction(name: .easeIn)
             panel.animator().alphaValue = 0
             panel.animator().setFrame(collapsed, display: true)
@@ -466,9 +477,17 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
 
     private func createPetPanel() {
         var frame = restoredFrame(key: Keys.petFrame)
+            ?? restoredFrame(key: Keys.legacyPetFrameV2)
             ?? migratedPetFrame()
             ?? defaultPetFrame()
-        frame.size = Metrics.petSize
+        if frame.size != PinChatVisualMetrics.petSize {
+            frame = NSRect(
+                x: frame.midX - PinChatVisualMetrics.petSize.width / 2,
+                y: frame.midY - PinChatVisualMetrics.petSize.height / 2,
+                width: PinChatVisualMetrics.petSize.width,
+                height: PinChatVisualMetrics.petSize.height
+            )
+        }
         let panel = NSPanel(
             contentRect: frame,
             styleMask: [.borderless, .nonactivatingPanel],
@@ -483,7 +502,7 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
 
     private func createComposerPanel() {
         let panel = ChatPanel(
-            contentRect: NSRect(origin: .zero, size: Metrics.composerSize),
+            contentRect: NSRect(origin: .zero, size: PinChatVisualMetrics.composerSize),
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
@@ -495,7 +514,7 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
 
     private func createStatusPanel() {
         let panel = ChatPanel(
-            contentRect: NSRect(origin: .zero, size: Metrics.statusSize),
+            contentRect: NSRect(origin: .zero, size: PinChatVisualMetrics.statusSize),
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
@@ -507,7 +526,7 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
 
     private func createAnswerPanel() {
         let restored = restoredFrame(key: Keys.answerFrame)
-            ?? NSRect(origin: .zero, size: Metrics.answerSize)
+            ?? NSRect(origin: .zero, size: PinChatVisualMetrics.answerSize)
         let panel = ChatPanel(
             contentRect: restored,
             styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
@@ -544,16 +563,16 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
             return
         }
         let collapsed = NSRect(
-            x: target.midX - 24,
+            x: target.midX - 18,
             y: target.minY,
-            width: 48,
+            width: 36,
             height: target.height
         )
         panel.alphaValue = 0
         panel.setFrame(collapsed, display: true)
         panel.makeKeyAndOrderFront(nil)
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.23
+            context.duration = 0.17
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
             panel.animator().alphaValue = 1
             panel.animator().setFrame(target, display: true)
@@ -566,6 +585,8 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
             panel.orderFrontRegardless()
             return
         }
+        let preservesAttachment = panel === answerPanel
+        if preservesAttachment { positioningPanels = true }
         var start = target
         start.origin.y += expansionDirection == .below ? 10 : -10
         panel.alphaValue = 0
@@ -576,6 +597,9 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
             panel.animator().alphaValue = 1
             panel.animator().setFrame(target, display: true)
+        } completionHandler: { [weak self] in
+            guard preservesAttachment else { return }
+            Task { @MainActor in self?.positioningPanels = false }
         }
     }
 
@@ -637,10 +661,10 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
         var sizes: [NSSize] = []
         if isComposerVisible, let composerPanel {
             panels.append(composerPanel)
-            sizes.append(Metrics.composerSize)
+            sizes.append(PinChatVisualMetrics.composerSize)
         } else if isStatusVisible, let statusPanel {
             panels.append(statusPanel)
-            sizes.append(Metrics.statusSize)
+            sizes.append(PinChatVisualMetrics.statusSize)
             if isAnswerVisible, !answerDetached, let answerPanel {
                 panels.append(answerPanel)
                 sizes.append(answerPanel.frame.size)
@@ -649,19 +673,24 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
         guard !panels.isEmpty else { return }
 
         let totalHeight = sizes.reduce(0) { $0 + $1.height }
-            + Metrics.gap * CGFloat(max(0, sizes.count - 1))
+            + PinChatVisualMetrics.attachmentGap * CGFloat(max(0, sizes.count - 1))
         expansionDirection = WindowPlacement.preferredAttachmentDirection(
             anchor: petPanel.frame,
             in: visible,
             requiredHeight: totalHeight,
-            gap: Metrics.gap
+            gap: PinChatVisualMetrics.attachmentGap
         )
+        var attachmentAnchor = petPanel.frame
+        if expansionDirection == .below {
+            attachmentAnchor.origin.y += PinChatVisualMetrics.launcherOverlap
+            attachmentAnchor.size.height -= PinChatVisualMetrics.launcherOverlap
+        }
         let frames = WindowPlacement.stackedFrames(
             sizes: sizes,
-            attachedTo: petPanel.frame,
+            attachedTo: attachmentAnchor,
             in: visible,
             direction: expansionDirection,
-            gap: Metrics.gap
+            gap: PinChatVisualMetrics.attachmentGap
         )
 
         positioningPanels = true
@@ -704,23 +733,23 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
 
     private func defaultPetFrame() -> NSRect {
         guard let visible = NSScreen.main?.visibleFrame else {
-            return NSRect(origin: .zero, size: Metrics.petSize)
+            return NSRect(origin: .zero, size: PinChatVisualMetrics.petSize)
         }
         return NSRect(
-            x: visible.maxX - Metrics.petSize.width - 28,
-            y: visible.midY - Metrics.petSize.height / 2,
-            width: Metrics.petSize.width,
-            height: Metrics.petSize.height
+            x: visible.maxX - PinChatVisualMetrics.petSize.width - 28,
+            y: visible.midY - PinChatVisualMetrics.petSize.height / 2,
+            width: PinChatVisualMetrics.petSize.width,
+            height: PinChatVisualMetrics.petSize.height
         )
     }
 
     private func migratedPetFrame() -> NSRect? {
         guard let legacy = restoredFrame(key: Keys.legacyFloatingButtonFrame) else { return nil }
         return NSRect(
-            x: legacy.midX - Metrics.petSize.width / 2,
-            y: legacy.midY - Metrics.petSize.height / 2,
-            width: Metrics.petSize.width,
-            height: Metrics.petSize.height
+            x: legacy.midX - PinChatVisualMetrics.petSize.width / 2,
+            y: legacy.midY - PinChatVisualMetrics.petSize.height / 2,
+            width: PinChatVisualMetrics.petSize.width,
+            height: PinChatVisualMetrics.petSize.height
         )
     }
 
