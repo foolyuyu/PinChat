@@ -5,6 +5,46 @@ enum ChatRole: String, Codable, Sendable {
     case assistant
 }
 
+enum CodexTaskState: String, Equatable, Sendable {
+    case thinking
+    case waiting
+    case completed
+    case stopped
+
+    var isInProgress: Bool {
+        self == .thinking || self == .waiting
+    }
+}
+
+struct CodexTaskActivity: Equatable, Sendable {
+    var threadID: String
+    var title: String
+    var state: CodexTaskState
+    var updatedAt: Date
+}
+
+enum CodexTaskEventReducer {
+    static func state(
+        eventTypes: [String],
+        serverStatus: String? = nil,
+        activeFlags: [String] = []
+    ) -> CodexTaskState {
+        if serverStatus == "active" {
+            return activeFlags.isEmpty ? .thinking : .waiting
+        }
+
+        for event in eventTypes.reversed() {
+            switch event {
+            case "task_started": return .thinking
+            case "task_complete": return .completed
+            case "turn_aborted": return .stopped
+            default: continue
+            }
+        }
+        return .completed
+    }
+}
+
 struct ChatMessage: Identifiable, Codable, Hashable, Sendable {
     var id: UUID
     var sourceID: String?

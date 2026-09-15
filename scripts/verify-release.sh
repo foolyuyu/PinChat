@@ -13,6 +13,8 @@ product_baseline="${output_dir}/PRODUCT_REQUIREMENTS_BASELINE_v2.0.md"
 product_baseline_checksum="${output_dir}/PRODUCT_REQUIREMENTS_BASELINE_v2.0.sha256"
 visual_baseline="${output_dir}/VISUAL_OPTIMIZATION_REQUIREMENTS_BASELINE_v2.1.md"
 visual_baseline_checksum="${output_dir}/VISUAL_OPTIMIZATION_REQUIREMENTS_BASELINE_v2.1.sha256"
+activity_baseline="${output_dir}/DESKTOP_ACTIVITY_REQUIREMENTS_BASELINE_v2.2.md"
+activity_baseline_checksum="${output_dir}/DESKTOP_ACTIVITY_REQUIREMENTS_BASELINE_v2.2.sha256"
 
 cd "$package_dir"
 swift test
@@ -32,12 +34,15 @@ test -r "$product_baseline"
 test -r "$product_baseline_checksum"
 test -r "$visual_baseline"
 test -r "$visual_baseline_checksum"
+test -r "$activity_baseline"
+test -r "$activity_baseline_checksum"
 (
     cd "$output_dir"
     shasum -a 256 -c "${baseline_checksum:t}"
     shasum -a 256 -c "${optimization_baseline_checksum:t}"
     shasum -a 256 -c "${product_baseline_checksum:t}"
     shasum -a 256 -c "${visual_baseline_checksum:t}"
+    shasum -a 256 -c "${activity_baseline_checksum:t}"
 )
 
 echo "PinChat release verification passed: $app_dir"

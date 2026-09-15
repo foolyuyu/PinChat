@@ -52,6 +52,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var connectionStatus: ConnectionStatus = .starting
     @Published private(set) var isGenerating = false
     @Published private(set) var lastTurnError: String?
+    @Published private(set) var desktopActivity: CodexTaskActivity?
     @Published var alertMessage: String?
 
     private let service: CodexAppServer
@@ -60,6 +61,7 @@ final class AppModel: ObservableObject {
     private var activeAssistantMessageID: UUID?
     private var syncTask: Task<Void, Never>?
     private var syncInFlight = false
+    private var desktopActivitySyncInFlight = false
     private var needsRestartAfterExternalHandoff = false
 
     var selectedSession: ChatSession? {
@@ -280,14 +282,11 @@ final class AppModel: ObservableObject {
             completion()
             return
         }
-        syncTask?.cancel()
-        syncTask = nil
         service.releaseThreadForExternalClient(threadID: threadID) { [weak self] in
             Task { @MainActor in
                 guard let self else { return }
                 self.syncInFlight = false
-                self.needsRestartAfterExternalHandoff = true
-                self.connectionStatus = .starting
+                self.needsRestartAfterExternalHandoff = false
                 completion()
             }
         }
@@ -325,10 +324,26 @@ final class AppModel: ObservableObject {
     private func startSyncLoop() {
         syncTask?.cancel()
         syncTask = Task { [weak self] in
+            self?.syncLatestDesktopTask()
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(1.25))
                 guard !Task.isCancelled else { break }
                 self?.syncCurrentConversation()
+                self?.syncLatestDesktopTask()
+            }
+        }
+    }
+
+    private func syncLatestDesktopTask() {
+        guard !desktopActivitySyncInFlight else { return }
+        desktopActivitySyncInFlight = true
+        service.readLatestDesktopTask { [weak self] result in
+            Task { @MainActor in
+                guard let self else { return }
+                self.desktopActivitySyncInFlight = false
+                if case .success(let activity) = result {
+                    self.desktopActivity = activity
+                }
             }
         }
     }

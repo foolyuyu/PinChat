@@ -8,47 +8,33 @@ struct PetRootView: View {
     private var animation: PetAnimation {
         PetAnimation.resolve(
             isDragging: controller.isDraggingPet,
-            isGenerating: model.isGenerating,
+            isGenerating: model.isGenerating || model.desktopActivity?.state.isInProgress == true,
             hasError: model.lastTurnError != nil,
             hasAnswer: !model.latestAssistantText.isEmpty
         )
     }
 
     var body: some View {
-        VStack(spacing: 3) {
-            PetSpriteView(store: controller.spriteStore, animation: animation)
-                .frame(
-                    width: PinChatVisualMetrics.petArtworkSize.width,
-                    height: PinChatVisualMetrics.petArtworkSize.height
-                )
-                .contentShape(Rectangle())
-                .onTapGesture { controller.toggleComposer() }
-                .gesture(
-                    DragGesture(minimumDistance: 2)
-                        .onChanged { _ in controller.movePet(to: NSEvent.mouseLocation) }
-                        .onEnded { _ in controller.finishPetDrag() }
-                )
-
-            if controller.isPetLauncherVisible {
-                PetLauncherButton(action: controller.showComposer)
-                    .transition(.opacity.combined(with: .scale(scale: 0.92)))
-            } else {
-                Color.clear
-                    .frame(
-                        width: PinChatVisualMetrics.petLauncherSize,
-                        height: PinChatVisualMetrics.petLauncherSize
-                    )
-                    .allowsHitTesting(false)
-            }
-        }
-        .padding(.top, 3)
+        PetSpriteView(store: controller.spriteStore, animation: animation)
+            .frame(
+                width: PinChatVisualMetrics.petArtworkSize.width,
+                height: PinChatVisualMetrics.petArtworkSize.height
+            )
+            .contentShape(Rectangle())
+            .onHover(perform: controller.petHoverChanged)
+            .onTapGesture { controller.activatePet() }
+            .gesture(
+                DragGesture(minimumDistance: 2)
+                    .onChanged { _ in controller.movePet(to: NSEvent.mouseLocation) }
+                    .onEnded { _ in controller.finishPetDrag() }
+            )
         .frame(
             width: PinChatVisualMetrics.petSize.width,
             height: PinChatVisualMetrics.petSize.height,
-            alignment: .top
+            alignment: .center
         )
-        .animation(.easeOut(duration: 0.12), value: controller.isPetLauncherVisible)
         .accessibilityElement(children: .contain)
+        .accessibilityLabel("打开 PinChat")
     }
 }
 
@@ -150,9 +136,18 @@ struct TaskStatusCard: View {
     @ObservedObject var model: AppModel
     @ObservedObject var controller: AppController
 
-    private var isFailed: Bool { model.lastTurnError != nil }
+    private var showsDesktopActivity: Bool { controller.isDesktopActivityStatus }
+    private var desktopState: CodexTaskState? { model.desktopActivity?.state }
+    private var isWorking: Bool {
+        showsDesktopActivity ? desktopState?.isInProgress == true : model.isGenerating
+    }
+    private var isFailed: Bool {
+        showsDesktopActivity ? desktopState == .stopped : model.lastTurnError != nil
+    }
     private var isComplete: Bool {
-        !model.isGenerating && !model.latestAssistantText.isEmpty && !isFailed
+        showsDesktopActivity
+            ? desktopState == .completed
+            : !model.isGenerating && !model.latestAssistantText.isEmpty && !isFailed
     }
 
     var body: some View {
@@ -170,7 +165,17 @@ struct TaskStatusCard: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            if model.isGenerating {
+            if showsDesktopActivity {
+                if model.desktopActivity != nil {
+                    ActionCircleButton(
+                        systemName: "arrow.up.right",
+                        tint: .primary.opacity(0.075),
+                        foreground: .secondary,
+                        help: "在 Codex 中打开",
+                        action: controller.openDesktopActivityInCodex
+                    )
+                }
+            } else if model.isGenerating {
                 ActionCircleButton(
                     systemName: "stop.fill",
                     tint: .primary.opacity(0.075),
@@ -226,12 +231,13 @@ struct TaskStatusCard: View {
         }
         .shadow(color: .black.opacity(0.12), radius: 9, y: 4)
         .padding(4)
-        .animation(.spring(response: 0.34, dampingFraction: 0.82), value: model.isGenerating)
+        .onHover(perform: controller.statusHoverChanged)
+        .animation(.spring(response: 0.34, dampingFraction: 0.82), value: isWorking)
     }
 
     @ViewBuilder
     private var statusGlyph: some View {
-        if model.isGenerating {
+        if isWorking {
             ProgressView()
                 .controlSize(.small)
                 .frame(width: 24, height: 24)
@@ -242,21 +248,36 @@ struct TaskStatusCard: View {
                 .frame(width: 24, height: 24)
                 .background(Color.red.opacity(0.12), in: Circle())
         } else {
-            Image(systemName: "sparkles")
+            Image(systemName: isComplete ? "checkmark" : "sparkles")
                 .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(Color.accentColor)
+                .foregroundStyle(isComplete ? Color.green : Color.accentColor)
                 .frame(width: 24, height: 24)
-                .background(Color.accentColor.opacity(0.11), in: Circle())
+                .background(
+                    isComplete ? Color.green.opacity(0.12) : Color.accentColor.opacity(0.11),
+                    in: Circle()
+                )
         }
     }
 
     private var title: String {
+        if showsDesktopActivity {
+            switch desktopState {
+            case .thinking: return "正在思考"
+            case .waiting: return "等待你的操作"
+            case .completed: return "已完成"
+            case .stopped: return "已停止"
+            case .none: return "Codex 已就绪"
+            }
+        }
         if model.isGenerating { return "正在处理" }
         if isFailed { return "未能完成" }
         return model.selectedSession?.title ?? "已完成"
     }
 
     private var detail: String {
+        if showsDesktopActivity {
+            return model.desktopActivity?.title ?? "在 Codex 中开始任务后会显示在这里"
+        }
         if let error = model.lastTurnError { return error }
         if model.isGenerating {
             return model.latestUserText.isEmpty ? "Codex 正在思考…" : model.latestUserText
@@ -454,35 +475,6 @@ private struct MessageBubble: View {
             }
         }
         .frame(maxWidth: .infinity)
-    }
-}
-
-private struct PetLauncherButton: View {
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            Image(systemName: "square.and.pencil")
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(.primary)
-                .frame(
-                    width: PinChatVisualMetrics.petLauncherSize,
-                    height: PinChatVisualMetrics.petLauncherSize
-                )
-                .background(
-                    .regularMaterial,
-                    in: RoundedRectangle(cornerRadius: 10, style: .continuous)
-                )
-                .overlay {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .strokeBorder(Color.primary.opacity(0.09), lineWidth: 0.75)
-                }
-                .shadow(color: .black.opacity(0.13), radius: 7, y: 3)
-        }
-        .buttonStyle(.plain)
-        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .help("开始提问")
-        .accessibilityLabel("开始提问")
     }
 }
 

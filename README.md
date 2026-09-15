@@ -1,12 +1,14 @@
-# PinChat 2.1 视觉优化版
+# PinChat 2.2 桌面任务联动版
 
 PinChat 是一个 macOS 原生 Codex 桌宠伴随组件，不是另一套聊天主应用。它通过本机 Codex App Server 和官方 ChatGPT 登录使用用户的 Free、Plus、Pro 或工作区额度，不需要 API Key，并继承本机 Codex 的默认模型、推理强度和人格。
 
 ## 核心体验
 
 - 高保真蓝色 Codex 桌宠，支持待机、工作、完成、失败和拖动动画，并过滤图集中的透明空帧
-- 桌宠按官方实机参考缩至约 52 pt，铅笔入口为 28 pt，整体略小于官方桌宠且不再占据大块透明区域
-- 点击官方同类轮廓铅笔后，入口直接由横向输入条替换；点击桌宠、按 `Esc` 或再次使用快捷键均可收起
+- 桌宠按官方实机参考保持约 52 pt，透明承载区进一步缩至 64×64 pt，不再保留下方铅笔入口
+- 点击桌宠本体直接展开横向输入条；再次点击桌宠、按 `Esc` 或再次使用快捷键均可收起
+- 鼠标在桌宠上短暂停留后，显示最近活跃的 Codex 桌面任务及“正在思考 / 等待操作 / 已完成 / 已停止”状态
+- 悬停状态卡出现时点击桌宠，卡片先向中间收起，输入框再沿同一锚点紧接展开
 - `⌥⇧Space` 在任意普通桌面或全屏 Space 快速打开输入条
 - 输入条采用 360×50 pt 紧凑比例，请求发出后由 410×66 pt 思考/完成状态卡替换
 - 完成卡提供：`↗` 在 Codex 中打开、`✓` 确认完成、`↓/↑` 展开或折叠回答
@@ -24,7 +26,9 @@ PinChat 会依次查找：
 3. `/usr/local/bin/codex`
 4. 当前进程 `PATH` 中的 `codex`
 
-对话通过真实 Codex 线程进行。`↗` 会先停止 PinChat 的同步、取消线程订阅并关闭 PinChat 启动的 App Server 子进程，再用 `codex://threads/<thread-id>` 打开同一任务，因此可以直接在 Codex 主应用里继续。
+对话通过真实 Codex 线程进行。`↗` 会先取消 PinChat 对该线程的订阅，再用 `codex://threads/<thread-id>` 打开同一任务，因此可以直接在 Codex 主应用里继续；只读 App Server 保持运行，用于继续观察桌面任务状态。
+
+桌面任务摘要通过同一个本机 App Server 的只读 `thread/list` 索引以及对应本机任务记录中的 `task_started`、`task_complete`、`turn_aborted` 事件生成；它不会向模型额外发问，也不会接管或修改 Codex 桌面端任务。交接任务后 PinChat 保持只读服务运行，以便继续显示桌面任务进度。
 
 PinChat 不读取浏览器 Cookie，不保存密码或 API Key。官方 OAuth 凭据和额度均由本机 Codex 管理。PinChat 的快速提问使用只读沙箱和 `never` 审批；需要工具执行、文件修改或审批的工作应交接到 Codex 主应用。
 
@@ -59,7 +63,7 @@ swift test
 1. 退出旧版 PinChat。
 2. 将 `Release/PinChat.app` 拖入“应用程序”，或直接双击测试。
 3. 首次运行时按提示使用 ChatGPT 官方登录。
-4. 点击桌宠旁的铅笔，或按 `⌥⇧Space` 提问。
+4. 点击桌宠本体，或按 `⌥⇧Space` 提问；悬停桌宠可查看最近 Codex 桌面任务状态。
 
 本地显示副本存放在 `~/Library/Application Support/PinChat/sessions.json`；窗口位置和开关存放在 macOS `UserDefaults`。历史任务统一在 Codex 主应用中管理，PinChat 不提供历史入口。
 
@@ -73,6 +77,10 @@ swift test
 ## 2.1 官方桌宠参考记录
 
 v2.1 在用户授权下对本机官方 Codex 桌宠完成了悬停、铅笔按下、松开与输入框展开的连续观察。官方桌宠约 60 pt 宽，悬停工具条约 120×40 pt，输入条约 322×42 pt，并在鼠标松开后约 120 ms 内完成替换。PinChat 没有提交包含用户界面的参考截图，只在冻结的 `Release/VISUAL_OPTIMIZATION_REQUIREMENTS_BASELINE_v2.1.md` 中保存去标识化测量值和验收标准。
+
+## 2.2 桌面任务联动
+
+v2.2 删除了功能重复的铅笔按钮。桌宠本体成为唯一点击入口；悬停约 0.32 秒展示桌面任务摘要，移出桌宠与卡片约 0.20 秒后收起。状态来源为本机真实 Codex 任务记录，并对大型任务文件使用增量读取，避免持续全量扫描。
 
 ## 官方能力依据
 

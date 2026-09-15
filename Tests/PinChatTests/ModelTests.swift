@@ -87,11 +87,41 @@ import Testing
 @Test func visualMetricsRemainSmallerThanOfficialPetReference() {
     #expect(PinChatVisualMetrics.petArtworkSize.width == 52)
     #expect(PinChatVisualMetrics.petArtworkSize.width < 60)
-    #expect(PinChatVisualMetrics.petSize == NSSize(width: 96, height: 96))
-    #expect(PinChatVisualMetrics.petLauncherSize == 28)
+    #expect(PinChatVisualMetrics.petSize == NSSize(width: 64, height: 64))
     #expect(PinChatVisualMetrics.composerActionSize == 30)
     #expect(PinChatVisualMetrics.statusActionSize == 28)
     #expect(PinChatVisualMetrics.answerToolbarActionSize == 24)
+}
+
+@Test func desktopTaskEventsResolveRealCodexProgress() {
+    #expect(CodexTaskEventReducer.state(eventTypes: ["task_started"]) == .thinking)
+    #expect(CodexTaskEventReducer.state(
+        eventTypes: ["task_started", "item_completed", "task_complete"]
+    ) == .completed)
+    #expect(CodexTaskEventReducer.state(
+        eventTypes: ["task_complete", "task_started"]
+    ) == .thinking)
+    #expect(CodexTaskEventReducer.state(
+        eventTypes: ["task_started", "turn_aborted"]
+    ) == .stopped)
+}
+
+@Test func liveServerStatusOverridesPersistedRolloutEvents() {
+    #expect(CodexTaskEventReducer.state(
+        eventTypes: ["task_complete"],
+        serverStatus: "active"
+    ) == .thinking)
+    #expect(CodexTaskEventReducer.state(
+        eventTypes: ["task_complete"],
+        serverStatus: "active",
+        activeFlags: ["waitingOnUserInput"]
+    ) == .waiting)
+}
+
+@Test func hoverTimingAvoidsAccidentalFlyoversAndVisibleGaps() {
+    #expect(PinChatVisualMetrics.hoverRevealDelay >= 0.30)
+    #expect(PinChatVisualMetrics.hoverRevealDelay < 0.50)
+    #expect(PinChatVisualMetrics.hoverDismissDelay >= 0.15)
 }
 
 @Test func compactPanelsMatchFrozenV21Targets() {

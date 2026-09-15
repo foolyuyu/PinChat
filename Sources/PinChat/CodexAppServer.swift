@@ -19,6 +19,20 @@ final class CodexAppServer: @unchecked Sendable {
         let text: String
     }
 
+    private struct IndexedThread {
+        let id: String
+        let title: String
+        let rolloutPath: String?
+        let updatedAt: Date
+        let serverStatus: String?
+        let activeFlags: [String]
+    }
+
+    private struct RolloutSnapshot {
+        var offset: UInt64
+        var state: CodexTaskState
+    }
+
     var onLoginCompleted: (@Sendable (Result<Void, Error>) -> Void)?
     var onAccountUpdated: (@Sendable () -> Void)?
     var onAgentDelta: (@Sendable (_ threadID: String, _ itemID: String, _ delta: String) -> Void)?
@@ -36,6 +50,7 @@ final class CodexAppServer: @unchecked Sendable {
     private(set) var activeTurn: ActiveTurn?
     private var isInitialized = false
     private var agentMessagePhases: [String: String] = [:]
+    private var rolloutSnapshots: [String: RolloutSnapshot] = [:]
 
     deinit {
         stop()
@@ -90,7 +105,7 @@ final class CodexAppServer: @unchecked Sendable {
                         "clientInfo": [
                             "name": "pinchat_macos",
                             "title": "PinChat",
-                            "version": "0.2.0"
+                            "version": "0.2.2"
                         ]
                     ]
                 ) { result in
@@ -230,6 +245,53 @@ final class CodexAppServer: @unchecked Sendable {
         }
     }
 
+    func readLatestDesktopTask(
+        completion: @escaping @Sendable (Result<CodexTaskActivity?, Error>) -> Void
+    ) {
+        sendRequest(
+            method: "thread/list",
+            params: [
+                "limit": 12,
+                "sortKey": "recency_at",
+                "sortDirection": "desc",
+                "archived": false,
+                "useStateDbOnly": true
+            ]
+        ) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .failure(let error):
+                completion(.failure(error))
+            case .success(let payload):
+                guard let rawThreads = payload["data"] as? [JSON] else {
+                    completion(.failure(PinChatError.invalidResponse))
+                    return
+                }
+                guard let thread = rawThreads.lazy.compactMap(Self.indexedThread).first else {
+                    completion(.success(nil))
+                    return
+                }
+                let state = thread.rolloutPath.map {
+                    self.readTaskState(
+                        path: $0,
+                        serverStatus: thread.serverStatus,
+                        activeFlags: thread.activeFlags
+                    )
+                } ?? CodexTaskEventReducer.state(
+                    eventTypes: [],
+                    serverStatus: thread.serverStatus,
+                    activeFlags: thread.activeFlags
+                )
+                completion(.success(CodexTaskActivity(
+                    threadID: thread.id,
+                    title: thread.title,
+                    state: state,
+                    updatedAt: thread.updatedAt
+                )))
+            }
+        }
+    }
+
     func sendMessage(
         text: String,
         existingThreadID: String?,
@@ -293,15 +355,10 @@ final class CodexAppServer: @unchecked Sendable {
         sendRequest(
             method: "thread/unsubscribe",
             params: ["threadId": threadID]
-        ) { [weak self] _ in
-            guard let self else {
-                completion()
-                return
-            }
-            self.queue.async {
-                self.stopOnQueue()
-                completion()
-            }
+        ) { _ in
+            // Keep this read-only App Server alive so PinChat can continue observing
+            // Codex Desktop tasks after ownership of the conversation is handed off.
+            completion()
         }
     }
 
@@ -348,6 +405,111 @@ final class CodexAppServer: @unchecked Sendable {
                 completion(.success(threadID))
             }
         }
+    }
+
+    private static func indexedThread(_ value: JSON) -> IndexedThread? {
+        guard let id = value["id"] as? String,
+              value["parentThreadId"] is NSNull || value["parentThreadId"] == nil else {
+            return nil
+        }
+        let originator = value["originator"] as? String
+        let source = value["source"] as? String
+        guard originator == "Codex Desktop" || source == "vscode" else { return nil }
+
+        let rawTitle = (value["name"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            ?? (value["preview"] as? String)
+            ?? "Codex 任务"
+        let title = rawTitle
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+
+        let timestamp = (value["recencyAt"] as? NSNumber)?.doubleValue
+            ?? (value["updatedAt"] as? NSNumber)?.doubleValue
+            ?? Date().timeIntervalSince1970
+        let status = value["status"] as? JSON
+        return IndexedThread(
+            id: id,
+            title: title.isEmpty ? "Codex 任务" : title,
+            rolloutPath: value["path"] as? String,
+            updatedAt: Date(timeIntervalSince1970: timestamp),
+            serverStatus: status?["type"] as? String,
+            activeFlags: status?["activeFlags"] as? [String] ?? []
+        )
+    }
+
+    private func readTaskState(
+        path: String,
+        serverStatus: String?,
+        activeFlags: [String]
+    ) -> CodexTaskState {
+        if serverStatus == "active" {
+            return CodexTaskEventReducer.state(
+                eventTypes: [],
+                serverStatus: serverStatus,
+                activeFlags: activeFlags
+            )
+        }
+        guard let handle = FileHandle(forReadingAtPath: path) else { return .completed }
+        defer { try? handle.close() }
+        do {
+            let end = try handle.seekToEnd()
+            if let cached = rolloutSnapshots[path], cached.offset <= end {
+                if cached.offset == end { return cached.state }
+                let overlap: UInt64 = 96
+                let start = cached.offset > overlap ? cached.offset - overlap : 0
+                try handle.seek(toOffset: start)
+                let appended = try handle.readToEnd() ?? Data()
+                let event = Self.lastTaskEvent(in: appended)
+                let state = event.map { CodexTaskEventReducer.state(eventTypes: [$0]) }
+                    ?? cached.state
+                rolloutSnapshots[path] = RolloutSnapshot(offset: end, state: state)
+                return state
+            }
+
+            let state = Self.scanBackwardsForTaskState(handle: handle, end: end)
+            rolloutSnapshots[path] = RolloutSnapshot(offset: end, state: state)
+            return state
+        } catch {
+            return rolloutSnapshots[path]?.state ?? .completed
+        }
+    }
+
+    private static func scanBackwardsForTaskState(
+        handle: FileHandle,
+        end: UInt64
+    ) -> CodexTaskState {
+        let chunkSize: UInt64 = 256 * 1_024
+        let overlapLength = 96
+        var cursor = end
+        var laterPrefix = Data()
+
+        while cursor > 0 {
+            let start = cursor > chunkSize ? cursor - chunkSize : 0
+            do {
+                try handle.seek(toOffset: start)
+                guard var chunk = try handle.read(upToCount: Int(cursor - start)) else { break }
+                chunk.append(laterPrefix)
+                if let event = lastTaskEvent(in: chunk) {
+                    return CodexTaskEventReducer.state(eventTypes: [event])
+                }
+                laterPrefix = chunk.prefix(overlapLength)
+                cursor = start
+            } catch {
+                break
+            }
+        }
+        return .completed
+    }
+
+    private static func lastTaskEvent(in data: Data) -> String? {
+        let needles = ["task_started", "task_complete", "turn_aborted"]
+        let text = String(decoding: data, as: UTF8.self)
+        return needles.compactMap { event -> (String, String.Index)? in
+            let marker = "\"type\":\"event_msg\",\"payload\":{\"type\":\"\(event)\""
+            guard let range = text.range(of: marker, options: .backwards) else { return nil }
+            return (event, range.lowerBound)
+        }.max { $0.1 < $1.1 }?.0
     }
 
     private func sendRequest(

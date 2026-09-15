@@ -16,6 +16,11 @@ enum AnswerAttachmentState: Equatable, Sendable {
     }
 }
 
+enum TaskStatusContext: Equatable, Sendable {
+    case conversation
+    case desktopActivity
+}
+
 enum WindowPlacement {
     static func clamped(_ frame: NSRect, to visibleFrame: NSRect) -> NSRect {
         var result = frame
@@ -121,9 +126,8 @@ enum PanelPresentationPolicy {
 }
 
 enum PinChatVisualMetrics {
-    static let petSize = NSSize(width: 96, height: 96)
+    static let petSize = NSSize(width: 64, height: 64)
     static let petArtworkSize = NSSize(width: 52, height: 56)
-    static let petLauncherSize: CGFloat = 28
     static let composerSize = NSSize(width: 360, height: 50)
     static let composerActionSize: CGFloat = 30
     static let statusSize = NSSize(width: 410, height: 66)
@@ -132,7 +136,8 @@ enum PinChatVisualMetrics {
     static let answerToolbarActionSize: CGFloat = 24
     static let followUpActionSize: CGFloat = 30
     static let attachmentGap: CGFloat = 3
-    static let launcherOverlap: CGFloat = 32
+    static let hoverRevealDelay: TimeInterval = 0.32
+    static let hoverDismissDelay: TimeInterval = 0.20
 }
 
 final class ChatPanel: NSPanel {
@@ -162,11 +167,10 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
     @Published private(set) var isDraggingPet = false
     @Published private(set) var answerAttachment: AnswerAttachmentState = .attached
     @Published private(set) var expansionDirection: AttachmentDirection = .below
+    @Published private(set) var statusContext: TaskStatusContext?
 
     var answerDetached: Bool { answerAttachment == .detached }
-    var isPetLauncherVisible: Bool {
-        !isComposerVisible && !isStatusVisible && !isAnswerVisible
-    }
+    var isDesktopActivityStatus: Bool { statusContext == .desktopActivity }
 
     let model = AppModel()
     let spriteStore = PetSpriteStore()
@@ -183,11 +187,17 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
     private var codexHandoffInProgress = false
     private var screenParametersObserver: NSObjectProtocol?
     private var positioningPanels = false
+    private var hoverRevealTask: Task<Void, Never>?
+    private var hoverDismissTask: Task<Void, Never>?
+    private var petHovered = false
+    private var statusHovered = false
+    private var panelTransitionInProgress = false
 
     private enum Keys {
         static let alwaysOnTop = "alwaysOnTop"
         static let floatingButtonEnabled = "floatingButtonEnabled"
-        static let petFrame = "petFrameV21"
+        static let petFrame = "petFrameV22"
+        static let legacyPetFrameV21 = "petFrameV21"
         static let legacyPetFrameV2 = "petFrameV2"
         static let legacyFloatingButtonFrame = "floatingButtonFrame"
         static let answerFrame = "answerFrameV2"
@@ -224,6 +234,8 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
     }
 
     func terminate() {
+        hoverRevealTask?.cancel()
+        hoverDismissTask?.cancel()
         if let screenParametersObserver {
             NotificationCenter.default.removeObserver(screenParametersObserver)
             self.screenParametersObserver = nil
@@ -232,7 +244,9 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
     }
 
     func toggleCompactWindow() {
-        if isComposerVisible || isStatusVisible || isAnswerVisible {
+        if isDesktopActivityStatus, isStatusVisible {
+            replaceStatusWithComposer()
+        } else if isComposerVisible || isStatusVisible || isAnswerVisible {
             hideCompactWindow()
         } else {
             showComposer()
@@ -244,8 +258,16 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
     }
 
     func toggleComposer() {
+        activatePet()
+    }
+
+    func activatePet() {
+        guard !isDraggingPet, !panelTransitionInProgress else { return }
+        cancelHoverTasks()
         if isComposerVisible {
             hideComposer()
+        } else if isStatusVisible, !model.isGenerating, !isAnswerVisible {
+            replaceStatusWithComposer()
         } else {
             showComposer()
         }
@@ -255,6 +277,7 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
         isComposerVisible = false
         isStatusVisible = false
         isAnswerVisible = false
+        statusContext = nil
         composerPanel?.orderOut(nil)
         statusPanel?.orderOut(nil)
         answerPanel?.orderOut(nil)
@@ -269,6 +292,7 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
         isStatusVisible = false
         isAnswerVisible = false
         isComposerVisible = true
+        statusContext = nil
         statusPanel?.orderOut(nil)
         answerPanel?.orderOut(nil)
         positionAttachedPanels()
@@ -309,6 +333,7 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
         isComposerVisible = false
         isAnswerVisible = false
         isStatusVisible = true
+        statusContext = .conversation
         composerPanel?.orderOut(nil)
         answerPanel?.orderOut(nil)
         model.send(text)
@@ -319,6 +344,7 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
     func showStatus() {
         isComposerVisible = false
         isStatusVisible = true
+        statusContext = .conversation
         composerPanel?.orderOut(nil)
         positionAttachedPanels()
         if let statusPanel, !statusPanel.isVisible {
@@ -337,6 +363,7 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
         } else {
             isStatusVisible = true
             isAnswerVisible = true
+            statusContext = .conversation
             answerAttachment = .attached
             positionAttachedPanels()
             statusPanel?.orderFrontRegardless()
@@ -386,6 +413,44 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
         }
     }
 
+    func openDesktopActivityInCodex() {
+        guard let threadID = model.desktopActivity?.threadID else { return }
+        if model.selectedSession?.codexThreadID == threadID {
+            openCurrentConversationInCodex()
+            return
+        }
+        openCodexThread(threadID)
+    }
+
+    func petHoverChanged(_ hovering: Bool) {
+        petHovered = hovering
+        if hovering {
+            hoverDismissTask?.cancel()
+            guard !isDraggingPet,
+                  !isComposerVisible,
+                  !isAnswerVisible,
+                  statusContext != .conversation else { return }
+            hoverRevealTask?.cancel()
+            hoverRevealTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(PinChatVisualMetrics.hoverRevealDelay))
+                guard !Task.isCancelled else { return }
+                self?.showDesktopActivityStatusIfNeeded()
+            }
+        } else {
+            hoverRevealTask?.cancel()
+            scheduleHoverDismiss()
+        }
+    }
+
+    func statusHoverChanged(_ hovering: Bool) {
+        statusHovered = hovering
+        if hovering {
+            hoverDismissTask?.cancel()
+        } else {
+            scheduleHoverDismiss()
+        }
+    }
+
     func showSettings() {
         model.refreshAccount()
         model.refreshConfiguration()
@@ -411,6 +476,12 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
     func movePet(to pointerLocation: NSPoint) {
         guard let panel = petPanel else { return }
         if petDragOffset == nil {
+            cancelHoverTasks()
+            if isDesktopActivityStatus {
+                isStatusVisible = false
+                statusContext = nil
+                statusPanel?.orderOut(nil)
+            }
             isDraggingPet = true
             petDragOffset = NSSize(
                 width: pointerLocation.x - panel.frame.minX,
@@ -477,6 +548,7 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
 
     private func createPetPanel() {
         var frame = restoredFrame(key: Keys.petFrame)
+            ?? restoredFrame(key: Keys.legacyPetFrameV21)
             ?? restoredFrame(key: Keys.legacyPetFrameV2)
             ?? migratedPetFrame()
             ?? defaultPetFrame()
@@ -579,7 +651,105 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
         }
     }
 
-    private func revealWithLift(_ panel: NSPanel) {
+    private func showDesktopActivityStatusIfNeeded() {
+        guard petHovered,
+              !panelTransitionInProgress,
+              !isComposerVisible,
+              !isAnswerVisible,
+              statusContext != .conversation else { return }
+        statusContext = .desktopActivity
+        isStatusVisible = true
+        positionAttachedPanels()
+        if let statusPanel, !statusPanel.isVisible {
+            revealWithLift(statusPanel, makeKey: false)
+        } else {
+            statusPanel?.orderFrontRegardless()
+        }
+    }
+
+    private func scheduleHoverDismiss() {
+        guard isDesktopActivityStatus else { return }
+        hoverDismissTask?.cancel()
+        hoverDismissTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(PinChatVisualMetrics.hoverDismissDelay))
+            guard !Task.isCancelled else { return }
+            self?.dismissDesktopActivityStatusIfNeeded()
+        }
+    }
+
+    private func dismissDesktopActivityStatusIfNeeded() {
+        guard !petHovered, !statusHovered, isDesktopActivityStatus else { return }
+        collapseStatusPanel(completion: nil)
+    }
+
+    private func replaceStatusWithComposer() {
+        guard isStatusVisible, !panelTransitionInProgress else {
+            showComposer()
+            return
+        }
+        collapseStatusPanel { [weak self] in
+            guard let self else { return }
+            self.isComposerVisible = true
+            self.positionAttachedPanels()
+            if let composerPanel = self.composerPanel {
+                self.revealHorizontally(composerPanel)
+            }
+            NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+
+    private func collapseStatusPanel(
+        completion: (@MainActor @Sendable () -> Void)?
+    ) {
+        guard let panel = statusPanel, panel.isVisible else {
+            isStatusVisible = false
+            statusContext = nil
+            completion?()
+            return
+        }
+        panelTransitionInProgress = true
+        isStatusVisible = false
+        statusContext = nil
+        let original = panel.frame
+        let collapsed = NSRect(
+            x: original.midX - 18,
+            y: original.minY,
+            width: 36,
+            height: original.height
+        )
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.13
+            context.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            panel.animator().alphaValue = 0
+            panel.animator().setFrame(collapsed, display: true)
+        } completionHandler: { [weak self] in
+            Task { @MainActor in
+                panel.orderOut(nil)
+                panel.alphaValue = 1
+                panel.setFrame(original, display: false)
+                self?.panelTransitionInProgress = false
+                completion?()
+            }
+        }
+    }
+
+    private func cancelHoverTasks() {
+        hoverRevealTask?.cancel()
+        hoverDismissTask?.cancel()
+        hoverRevealTask = nil
+        hoverDismissTask = nil
+    }
+
+    private func openCodexThread(_ threadID: String) {
+        guard let encodedID = threadID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+              let url = URL(string: "codex://threads/\(encodedID)"),
+              NSWorkspace.shared.open(url) else {
+            model.alertMessage = "无法打开 Codex 任务。"
+            return
+        }
+    }
+
+    private func revealWithLift(_ panel: NSPanel, makeKey: Bool = true) {
         let target = panel.frame
         guard !panel.isVisible else {
             panel.orderFrontRegardless()
@@ -591,7 +761,11 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
         start.origin.y += expansionDirection == .below ? 10 : -10
         panel.alphaValue = 0
         panel.setFrame(start, display: true)
-        panel.makeKeyAndOrderFront(nil)
+        if makeKey {
+            panel.makeKeyAndOrderFront(nil)
+        } else {
+            panel.orderFrontRegardless()
+        }
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.22
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
@@ -680,14 +854,9 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
             requiredHeight: totalHeight,
             gap: PinChatVisualMetrics.attachmentGap
         )
-        var attachmentAnchor = petPanel.frame
-        if expansionDirection == .below {
-            attachmentAnchor.origin.y += PinChatVisualMetrics.launcherOverlap
-            attachmentAnchor.size.height -= PinChatVisualMetrics.launcherOverlap
-        }
         let frames = WindowPlacement.stackedFrames(
             sizes: sizes,
-            attachedTo: attachmentAnchor,
+            attachedTo: petPanel.frame,
             in: visible,
             direction: expansionDirection,
             gap: PinChatVisualMetrics.attachmentGap
