@@ -43,6 +43,22 @@ enum MessageReconciler {
     }
 }
 
+struct CodexExternalHandoffLifecycle: Equatable, Sendable {
+    private(set) var chatNeedsRestart = false
+
+    mutating func beginHandoff() {
+        chatNeedsRestart = true
+    }
+
+    mutating func chatDidStart() {
+        chatNeedsRestart = false
+    }
+
+    func keepsRunning(_ purpose: CodexAppServerPurpose) -> Bool {
+        purpose.staysRunningDuringConversationHandoff
+    }
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published private(set) var sessions: [ChatSession]
@@ -55,14 +71,15 @@ final class AppModel: ObservableObject {
     @Published private(set) var desktopActivity: CodexTaskActivity?
     @Published var alertMessage: String?
 
-    private let service: CodexAppServer
+    private let chatService: CodexAppServer
+    private let activityService: CodexAppServer
     private let store: SessionStore
     private var activeSessionID: UUID?
     private var activeAssistantMessageID: UUID?
     private var syncTask: Task<Void, Never>?
     private var syncInFlight = false
     private var desktopActivitySyncInFlight = false
-    private var needsRestartAfterExternalHandoff = false
+    private var externalHandoffLifecycle = CodexExternalHandoffLifecycle()
 
     var selectedSession: ChatSession? {
         guard let selectedSessionID else { return nil }
@@ -81,20 +98,31 @@ final class AppModel: ObservableObject {
         selectedSession?.messages.isEmpty == false
     }
 
-    init(service: CodexAppServer = CodexAppServer(), store: SessionStore = SessionStore()) {
-        self.service = service
+    var canSend: Bool {
+        account != nil && connectionStatus == .ready
+    }
+
+    init(
+        chatService: CodexAppServer = CodexAppServer(purpose: .conversation),
+        activityService: CodexAppServer = CodexAppServer(purpose: .desktopActivityObserver),
+        store: SessionStore = SessionStore()
+    ) {
+        precondition(chatService.purpose == .conversation)
+        precondition(activityService.purpose == .desktopActivityObserver)
+        self.chatService = chatService
+        self.activityService = activityService
         self.store = store
         let loaded = store.load().sorted { $0.updatedAt > $1.updatedAt }
         sessions = loaded
         selectedSessionID = loaded.first?.id
 
-        service.onLoginCompleted = { [weak self] result in
+        chatService.onLoginCompleted = { [weak self] result in
             Task { @MainActor in self?.handleLoginCompleted(result) }
         }
-        service.onAccountUpdated = { [weak self] in
+        chatService.onAccountUpdated = { [weak self] in
             Task { @MainActor in self?.refreshAccount() }
         }
-        service.onAgentDelta = { [weak self] threadID, itemID, delta in
+        chatService.onAgentDelta = { [weak self] threadID, itemID, delta in
             Task {
                 @MainActor in self?.appendAgentDelta(
                     threadID: threadID,
@@ -103,7 +131,7 @@ final class AppModel: ObservableObject {
                 )
             }
         }
-        service.onAgentMessageCompleted = { [weak self] threadID, itemID, text in
+        chatService.onAgentMessageCompleted = { [weak self] threadID, itemID, text in
             Task {
                 @MainActor in self?.completeAgentMessage(
                     threadID: threadID,
@@ -112,10 +140,10 @@ final class AppModel: ObservableObject {
                 )
             }
         }
-        service.onTurnCompleted = { [weak self] threadID, error in
+        chatService.onTurnCompleted = { [weak self] threadID, error in
             Task { @MainActor in self?.finishTurn(threadID: threadID, error: error) }
         }
-        service.onProcessStopped = { [weak self] message in
+        chatService.onProcessStopped = { [weak self] message in
             Task { @MainActor in
                 self?.connectionStatus = .unavailable("本地服务已停止")
                 self?.isGenerating = false
@@ -123,12 +151,21 @@ final class AppModel: ObservableObject {
                 self?.alertMessage = message
             }
         }
+        activityService.onProcessStopped = { [weak self] _ in
+            Task { @MainActor in self?.desktopActivitySyncInFlight = false }
+        }
     }
 
     func start() {
-        needsRestartAfterExternalHandoff = false
+        startSyncLoop()
+        startActivityService()
+        startChatService()
+    }
+
+    private func startChatService() {
+        externalHandoffLifecycle.chatDidStart()
         connectionStatus = .starting
-        service.start { [weak self] result in
+        chatService.start { [weak self] result in
             Task { @MainActor in
                 guard let self else { return }
                 switch result {
@@ -137,9 +174,15 @@ final class AppModel: ObservableObject {
                 case .success:
                     self.refreshAccount()
                     self.refreshConfiguration()
-                    self.startSyncLoop()
                 }
             }
+        }
+    }
+
+    private func startActivityService() {
+        activityService.start { [weak self] result in
+            guard case .success = result else { return }
+            Task { @MainActor in self?.syncLatestDesktopTask() }
         }
     }
 
@@ -148,7 +191,7 @@ final class AppModel: ObservableObject {
     }
 
     func refreshAccount() {
-        service.readAccount { [weak self] result in
+        chatService.readAccount { [weak self] result in
             Task { @MainActor in
                 guard let self else { return }
                 switch result {
@@ -165,7 +208,7 @@ final class AppModel: ObservableObject {
 
     func signIn() {
         connectionStatus = .signingIn
-        service.beginChatGPTLogin { [weak self] result in
+        chatService.beginChatGPTLogin { [weak self] result in
             Task { @MainActor in
                 guard let self else { return }
                 switch result {
@@ -180,7 +223,7 @@ final class AppModel: ObservableObject {
     }
 
     func refreshConfiguration() {
-        service.readConfiguration { [weak self] result in
+        chatService.readConfiguration { [weak self] result in
             Task { @MainActor in
                 guard let self else { return }
                 if case .success(let configuration) = result {
@@ -223,7 +266,11 @@ final class AppModel: ObservableObject {
     func send(_ rawText: String) {
         let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !isGenerating else { return }
-        guard account != nil else {
+        guard canSend else {
+            if connectionStatus == .starting {
+                alertMessage = "正在重新连接本机 Codex，请稍后再发送。"
+                return
+            }
             alertMessage = PinChatError.notSignedIn.localizedDescription
             return
         }
@@ -247,7 +294,7 @@ final class AppModel: ObservableObject {
         sortSessionsKeepingSelection()
         persist()
 
-        service.sendMessage(
+        chatService.sendMessage(
             text: text,
             existingThreadID: existingThreadID,
             onThreadReady: { [weak self] threadID in
@@ -264,7 +311,7 @@ final class AppModel: ObservableObject {
 
     func stopGenerating() {
         guard isGenerating else { return }
-        service.interruptActiveTurn { [weak self] result in
+        chatService.interruptActiveTurn { [weak self] result in
             if case .failure(let error) = result {
                 Task { @MainActor in self?.alertMessage = error.localizedDescription }
             }
@@ -282,11 +329,12 @@ final class AppModel: ObservableObject {
             completion()
             return
         }
-        service.releaseThreadForExternalClient(threadID: threadID) { [weak self] in
+        externalHandoffLifecycle.beginHandoff()
+        connectionStatus = .starting
+        chatService.releaseThreadForExternalClient(threadID: threadID) { [weak self] in
             Task { @MainActor in
                 guard let self else { return }
                 self.syncInFlight = false
-                self.needsRestartAfterExternalHandoff = false
                 completion()
             }
         }
@@ -301,8 +349,8 @@ final class AppModel: ObservableObject {
     }
 
     func restartAfterExternalHandoffIfNeeded() {
-        guard needsRestartAfterExternalHandoff else { return }
-        start()
+        guard externalHandoffLifecycle.chatNeedsRestart else { return }
+        startChatService()
     }
 
     private func handleLoginCompleted(_ result: Result<Void, Error>) {
@@ -337,7 +385,7 @@ final class AppModel: ObservableObject {
     private func syncLatestDesktopTask() {
         guard !desktopActivitySyncInFlight else { return }
         desktopActivitySyncInFlight = true
-        service.readLatestDesktopTask { [weak self] result in
+        activityService.readLatestDesktopTask { [weak self] result in
             Task { @MainActor in
                 guard let self else { return }
                 self.desktopActivitySyncInFlight = false
@@ -354,7 +402,7 @@ final class AppModel: ObservableObject {
               let session = selectedSession,
               let threadID = session.codexThreadID else { return }
         syncInFlight = true
-        service.readMessages(threadID: threadID) { [weak self] result in
+        chatService.readMessages(threadID: threadID) { [weak self] result in
             Task { @MainActor in
                 guard let self else { return }
                 self.syncInFlight = false

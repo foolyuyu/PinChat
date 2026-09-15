@@ -21,6 +21,14 @@ enum TaskStatusContext: Equatable, Sendable {
     case desktopActivity
 }
 
+enum CodexThreadLink {
+    static func makeURL(threadID: String) -> URL? {
+        guard let encodedID = threadID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)
+        else { return nil }
+        return URL(string: "codex://threads/\(encodedID)")
+    }
+}
+
 enum WindowPlacement {
     static func clamped(_ frame: NSRect, to visibleFrame: NSRect) -> NSRect {
         var result = frame
@@ -394,8 +402,7 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
             model.alertMessage = "请先发送一条消息，创建 Codex 任务后再打开。"
             return
         }
-        guard let encodedID = threadID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
-              let url = URL(string: "codex://threads/\(encodedID)") else {
+        guard let url = CodexThreadLink.makeURL(threadID: threadID) else {
             model.alertMessage = "无法创建 Codex 任务链接。"
             return
         }
@@ -741,8 +748,7 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
     }
 
     private func openCodexThread(_ threadID: String) {
-        guard let encodedID = threadID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
-              let url = URL(string: "codex://threads/\(encodedID)"),
+        guard let url = CodexThreadLink.makeURL(threadID: threadID),
               NSWorkspace.shared.open(url) else {
             model.alertMessage = "无法打开 Codex 任务。"
             return

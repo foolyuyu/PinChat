@@ -1,6 +1,15 @@
 @preconcurrency import Foundation
 import AppKit
 
+enum CodexAppServerPurpose: String, Equatable, Sendable {
+    case conversation
+    case desktopActivityObserver
+
+    var staysRunningDuringConversationHandoff: Bool {
+        self == .desktopActivityObserver
+    }
+}
+
 final class CodexAppServer: @unchecked Sendable {
     typealias JSON = [String: Any]
 
@@ -40,7 +49,9 @@ final class CodexAppServer: @unchecked Sendable {
     var onTurnCompleted: (@Sendable (_ threadID: String, _ error: String?) -> Void)?
     var onProcessStopped: (@Sendable (_ message: String) -> Void)?
 
-    private let queue = DispatchQueue(label: "app.pinchat.codex-app-server")
+    let purpose: CodexAppServerPurpose
+
+    private let queue: DispatchQueue
     private var process: Process?
     private var input: FileHandle?
     private var outputBuffer = Data()
@@ -51,6 +62,11 @@ final class CodexAppServer: @unchecked Sendable {
     private var isInitialized = false
     private var agentMessagePhases: [String: String] = [:]
     private var rolloutSnapshots: [String: RolloutSnapshot] = [:]
+
+    init(purpose: CodexAppServerPurpose = .conversation) {
+        self.purpose = purpose
+        queue = DispatchQueue(label: "app.pinchat.codex-app-server.\(purpose.rawValue)")
+    }
 
     deinit {
         stop()
@@ -103,9 +119,13 @@ final class CodexAppServer: @unchecked Sendable {
                     method: "initialize",
                     params: [
                         "clientInfo": [
-                            "name": "pinchat_macos",
-                            "title": "PinChat",
-                            "version": "0.2.2"
+                            "name": purpose == .conversation
+                                ? "pinchat_macos"
+                                : "pinchat_activity_observer",
+                            "title": purpose == .conversation
+                                ? "PinChat"
+                                : "PinChat Activity Observer",
+                            "version": "0.2.3"
                         ]
                     ]
                 ) { result in
@@ -355,10 +375,18 @@ final class CodexAppServer: @unchecked Sendable {
         sendRequest(
             method: "thread/unsubscribe",
             params: ["threadId": threadID]
-        ) { _ in
-            // Keep this read-only App Server alive so PinChat can continue observing
-            // Codex Desktop tasks after ownership of the conversation is handed off.
-            completion()
+        ) { [weak self] _ in
+            guard let self else {
+                completion()
+                return
+            }
+            // `thread/unsubscribe` alone leaves an unsubscribe grace period. End the
+            // conversation process before launching Codex so the desktop app can take
+            // ownership immediately. The separate activity observer remains alive.
+            self.queue.async {
+                self.stopOnQueue()
+                completion()
+            }
         }
     }
 

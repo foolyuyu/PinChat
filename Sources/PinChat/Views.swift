@@ -67,7 +67,7 @@ struct MiniComposerView: View {
                 .font(.system(size: 15, weight: .regular))
                 .lineLimit(1...2)
                 .focused($focused)
-                .disabled(model.account == nil || model.isGenerating)
+                .disabled(!model.canSend || model.isGenerating)
                 .onSubmit(send)
 
             if model.account == nil {
@@ -92,8 +92,8 @@ struct MiniComposerView: View {
                     size: PinChatVisualMetrics.composerActionSize,
                     action: send
                 )
-                .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                .opacity(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.62 : 1)
+                .disabled(!model.canSend || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .opacity(!model.canSend || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.62 : 1)
             }
         }
         .padding(.horizontal, 8)
@@ -126,7 +126,7 @@ struct MiniComposerView: View {
 
     private func send() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, model.account != nil, !model.isGenerating else { return }
+        guard !text.isEmpty, model.canSend, !model.isGenerating else { return }
         draft = ""
         controller.sendMessage(text)
     }

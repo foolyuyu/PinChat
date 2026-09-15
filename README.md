@@ -1,4 +1,4 @@
-# PinChat 2.2 桌面任务联动版
+# PinChat 2.3 Codex 无冲突交接版
 
 PinChat 是一个 macOS 原生 Codex 桌宠伴随组件，不是另一套聊天主应用。它通过本机 Codex App Server 和官方 ChatGPT 登录使用用户的 Free、Plus、Pro 或工作区额度，不需要 API Key，并继承本机 Codex 的默认模型、推理强度和人格。
 
@@ -14,6 +14,7 @@ PinChat 是一个 macOS 原生 Codex 桌宠伴随组件，不是另一套聊天�
 - 完成卡提供：`↗` 在 Codex 中打开、`✓` 确认完成、`↓/↑` 展开或折叠回答
 - 完整回答按桌宠位置智能向上或向下展开，支持拖动、缩放、关闭和继续追问
 - 回答面板初次展开时吸附桌宠；单独拖动后成为自由窗口
+- `↗` 会在释放 PinChat 对话连接后打开同一个 Codex 任务，可立即在桌面应用继续对话
 - Codex 风格 Markdown、代码块和跟随系统强调色的用户气泡
 - 桌宠可在设置中关闭；无 Dock 图标、无历史任务列表、无独立主页面
 
@@ -26,9 +27,11 @@ PinChat 会依次查找：
 3. `/usr/local/bin/codex`
 4. 当前进程 `PATH` 中的 `codex`
 
-对话通过真实 Codex 线程进行。`↗` 会先取消 PinChat 对该线程的订阅，再用 `codex://threads/<thread-id>` 打开同一任务，因此可以直接在 Codex 主应用里继续；只读 App Server 保持运行，用于继续观察桌面任务状态。
+对话通过真实 Codex 线程进行。PinChat 使用两个相互独立的本机 App Server：对话通道负责账号、提问、流式回答和线程订阅；活动观察通道只读获取 Codex 桌面任务状态。
 
-桌面任务摘要通过同一个本机 App Server 的只读 `thread/list` 索引以及对应本机任务记录中的 `task_started`、`task_complete`、`turn_aborted` 事件生成；它不会向模型额外发问，也不会接管或修改 Codex 桌面端任务。交接任务后 PinChat 保持只读服务运行，以便继续显示桌面任务进度。
+`↗` 会让对话通道取消当前线程订阅并彻底退出，等待线程释放完成后才通过 `codex://threads/<thread-id>` 打开同一任务，因此可以立即在 Codex 主应用中继续，不再触发“已在另一个应用中打开”。只读活动观察通道保持运行，不影响桌宠状态同步。用户下次打开输入框时会按需启动新的对话通道，且不会重新占用已交接任务。
+
+桌面任务摘要通过独立活动观察通道的只读 `thread/list` 索引以及对应本机任务记录中的 `task_started`、`task_complete`、`turn_aborted` 事件生成；它不会向模型额外发问，也不会订阅、接管或修改 Codex 桌面端任务。
 
 PinChat 不读取浏览器 Cookie，不保存密码或 API Key。官方 OAuth 凭据和额度均由本机 Codex 管理。PinChat 的快速提问使用只读沙箱和 `never` 审批；需要工具执行、文件修改或审批的工作应交接到 Codex 主应用。
 
@@ -81,6 +84,10 @@ v2.1 在用户授权下对本机官方 Codex 桌宠完成了悬停、铅笔按�
 ## 2.2 桌面任务联动
 
 v2.2 删除了功能重复的铅笔按钮。桌宠本体成为唯一点击入口；悬停约 0.32 秒展示桌面任务摘要，移出桌宠与卡片约 0.20 秒后收起。状态来源为本机真实 Codex 任务记录，并对大型任务文件使用增量读取，避免持续全量扫描。
+
+## 2.3 Codex 无冲突交接
+
+v2.3 将原本共用的 App Server 拆成对话和活动观察两个通道。打开 Codex 前，对话通道在 `thread/unsubscribe` 后完整退出，消除 App Server 无订阅宽限期内的占用竞争；观察通道继续运行，桌宠任务摘要不中断。冻结验收标准见 `Release/HANDOFF_FIX_REQUIREMENTS_BASELINE_v2.3.md`。
 
 ## 官方能力依据
 

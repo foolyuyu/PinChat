@@ -84,6 +84,28 @@ import Testing
     #expect(behavior.contains(.stationary))
 }
 
+@Test func handoffOnlyKeepsDesktopActivityObserverRunning() {
+    var lifecycle = CodexExternalHandoffLifecycle()
+    #expect(!lifecycle.chatNeedsRestart)
+
+    lifecycle.beginHandoff()
+    #expect(lifecycle.chatNeedsRestart)
+    #expect(!lifecycle.keepsRunning(.conversation))
+    #expect(lifecycle.keepsRunning(.desktopActivityObserver))
+
+    lifecycle.chatDidStart()
+    #expect(!lifecycle.chatNeedsRestart)
+}
+
+@Test func codexHandoffURLKeepsTheOriginalThreadID() throws {
+    let threadID = "0199a124-12ab-7def-8000-123456789abc"
+    let url = try #require(CodexThreadLink.makeURL(threadID: threadID))
+
+    #expect(url.scheme == "codex")
+    #expect(url.host == "threads")
+    #expect(url.lastPathComponent == threadID)
+}
+
 @Test func visualMetricsRemainSmallerThanOfficialPetReference() {
     #expect(PinChatVisualMetrics.petArtworkSize.width == 52)
     #expect(PinChatVisualMetrics.petArtworkSize.width < 60)
