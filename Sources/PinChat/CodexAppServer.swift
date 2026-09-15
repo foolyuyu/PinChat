@@ -48,6 +48,7 @@ final class CodexAppServer: @unchecked Sendable {
     var onAgentMessageCompleted: (@Sendable (_ threadID: String, _ itemID: String, _ text: String) -> Void)?
     var onTurnCompleted: (@Sendable (_ threadID: String, _ error: String?) -> Void)?
     var onProcessStopped: (@Sendable (_ message: String) -> Void)?
+    var onAppCapabilitiesUpdated: (@Sendable ([CodexComposerCapability]) -> Void)?
 
     let purpose: CodexAppServerPurpose
 
@@ -125,7 +126,7 @@ final class CodexAppServer: @unchecked Sendable {
                             "title": purpose == .conversation
                                 ? "PinChat"
                                 : "PinChat Activity Observer",
-                            "version": "0.2.4"
+                            "version": "0.2.5"
                         ]
                     ]
                 ) { result in
@@ -265,13 +266,14 @@ final class CodexAppServer: @unchecked Sendable {
         }
     }
 
-    func readLatestDesktopTask(
-        completion: @escaping @Sendable (Result<CodexTaskActivity?, Error>) -> Void
+    func readDesktopTasks(
+        limit: Int = 5,
+        completion: @escaping @Sendable (Result<[CodexTaskActivity], Error>) -> Void
     ) {
         sendRequest(
             method: "thread/list",
             params: [
-                "limit": 12,
+                "limit": 50,
                 "sortKey": "recency_at",
                 "sortDirection": "desc",
                 "archived": false,
@@ -287,40 +289,160 @@ final class CodexAppServer: @unchecked Sendable {
                     completion(.failure(PinChatError.invalidResponse))
                     return
                 }
-                guard let thread = rawThreads.lazy.compactMap(Self.indexedThread).first else {
-                    completion(.success(nil))
-                    return
-                }
-                let state = thread.rolloutPath.map {
-                    self.readTaskState(
-                        path: $0,
+                let activities = rawThreads.compactMap(Self.indexedThread).map { thread in
+                    let state = thread.rolloutPath.map {
+                        self.readTaskState(
+                            path: $0,
+                            serverStatus: thread.serverStatus,
+                            activeFlags: thread.activeFlags
+                        )
+                    } ?? CodexTaskEventReducer.state(
+                        eventTypes: [],
                         serverStatus: thread.serverStatus,
                         activeFlags: thread.activeFlags
                     )
-                } ?? CodexTaskEventReducer.state(
-                    eventTypes: [],
-                    serverStatus: thread.serverStatus,
-                    activeFlags: thread.activeFlags
-                )
-                completion(.success(CodexTaskActivity(
-                    threadID: thread.id,
-                    title: thread.title,
-                    state: state,
-                    updatedAt: thread.updatedAt
+                    return CodexTaskActivity(
+                        threadID: thread.id,
+                        title: thread.title,
+                        state: state,
+                        updatedAt: thread.updatedAt
+                    )
+                }
+                completion(.success(CodexTaskActivityOrdering.visible(
+                    from: activities,
+                    limit: limit
                 )))
             }
+        }
+    }
+
+    func readComposerCapabilities(
+        cwd: String,
+        completion: @escaping @Sendable (Result<[CodexComposerCapability], Error>) -> Void
+    ) {
+        sendRequest(
+            method: "skills/list",
+            params: ["cwds": [cwd], "forceReload": false]
+        ) { [weak self] skillsResult in
+            guard let self else { return }
+            let skills: [CodexComposerCapability]
+            let skillsError: String?
+            switch skillsResult {
+            case .success(let payload):
+                skills = Self.skillCapabilities(from: payload)
+                skillsError = nil
+            case .failure(let error):
+                skills = []
+                skillsError = error.localizedDescription
+            }
+            self.sendRequest(
+                method: "app/installed",
+                params: ["forceRefresh": false]
+            ) { installedResult in
+                let apps: [CodexComposerCapability]
+                let appsError: String?
+                switch installedResult {
+                case .success(let payload):
+                    apps = Self.installedAppCapabilities(from: payload)
+                    appsError = nil
+                case .failure(let error):
+                    apps = []
+                    appsError = error.localizedDescription
+                }
+                if !skills.isEmpty || !apps.isEmpty {
+                    completion(.success(skills + apps))
+                } else if let message = skillsError ?? appsError {
+                    completion(.failure(PinChatError.server(message)))
+                } else {
+                    completion(.success([]))
+                }
+                self.requestAppDirectoryRefresh()
+            }
+        }
+    }
+
+    private func requestAppDirectoryRefresh() {
+        sendRequest(
+            method: "app/list",
+            params: ["limit": 50, "forceRefetch": false]
+        ) { [weak self] result in
+            guard let self, case .success(let payload) = result else { return }
+            let apps = Self.appCapabilities(from: payload)
+            if !apps.isEmpty { self.onAppCapabilitiesUpdated?(apps) }
+        }
+    }
+
+    static func skillCapabilities(from payload: JSON) -> [CodexComposerCapability] {
+        let groups = payload["data"] as? [JSON] ?? []
+        var seen = Set<String>()
+        return groups.flatMap { $0["skills"] as? [JSON] ?? [] }.compactMap { skill in
+            guard skill["enabled"] as? Bool != false,
+                  let invocationName = skill["name"] as? String,
+                  let path = skill["path"] as? String,
+                  seen.insert(path).inserted else { return nil }
+            let interface = skill["interface"] as? JSON
+            return CodexComposerCapability(
+                kind: .skill,
+                name: interface?["displayName"] as? String ?? invocationName,
+                summary: interface?["shortDescription"] as? String
+                    ?? skill["description"] as? String
+                    ?? "Codex 技能",
+                path: path,
+                invocationName: invocationName,
+                iconPath: interface?["iconSmall"] as? String,
+                brandColorHex: interface?["brandColor"] as? String
+            )
+        }
+    }
+
+    static func appCapabilities(from payload: JSON) -> [CodexComposerCapability] {
+        let apps = payload["data"] as? [JSON] ?? []
+        return apps.compactMap { app in
+            guard app["isAccessible"] as? Bool == true,
+                  app["isEnabled"] as? Bool == true,
+                  let id = app["id"] as? String,
+                  let name = app["name"] as? String else { return nil }
+            return CodexComposerCapability(
+                kind: .app,
+                name: name,
+                summary: app["description"] as? String ?? "ChatGPT 应用",
+                path: "app://\(id)",
+                invocationName: id
+            )
+        }
+    }
+
+    static func installedAppCapabilities(from payload: JSON) -> [CodexComposerCapability] {
+        let apps = payload["apps"] as? [JSON] ?? []
+        return apps.compactMap { app in
+            guard app["enabled"] as? Bool == true,
+                  app["callable"] as? Bool == true,
+                  let id = app["id"] as? String else { return nil }
+            let name = app["runtimeName"] as? String ?? id
+            return CodexComposerCapability(
+                kind: .app,
+                name: name,
+                summary: "已连接并可由 Codex 调用",
+                path: "app://\(id)",
+                invocationName: id
+            )
         }
     }
 
     func sendMessage(
         text: String,
         attachments: [ChatAttachment] = [],
+        capabilities: [CodexComposerCapability] = [],
+        workingDirectory: String,
         existingThreadID: String?,
         onThreadReady: @escaping @Sendable (String) -> Void,
         onTurnStarted: @escaping @Sendable (ActiveTurn) -> Void,
         completion: @escaping @Sendable (Result<Void, Error>) -> Void
     ) {
-        prepareThread(existingThreadID: existingThreadID) { [weak self] result in
+        prepareThread(
+            existingThreadID: existingThreadID,
+            workingDirectory: workingDirectory
+        ) { [weak self] result in
             guard let self else { return }
             switch result {
             case .failure(let error):
@@ -331,7 +453,12 @@ final class CodexAppServer: @unchecked Sendable {
                     method: "turn/start",
                     params: [
                         "threadId": threadID,
-                        "input": Self.turnInputItems(text: text, attachments: attachments),
+                        "input": Self.turnInputItems(
+                            text: text,
+                            attachments: attachments,
+                            capabilities: capabilities
+                        ),
+                        "cwd": workingDirectory,
                         "turnTrigger": "user"
                     ]
                 ) { response in
@@ -354,7 +481,11 @@ final class CodexAppServer: @unchecked Sendable {
         }
     }
 
-    static func turnInputItems(text: String, attachments: [ChatAttachment]) -> [JSON] {
+    static func turnInputItems(
+        text: String,
+        attachments: [ChatAttachment],
+        capabilities: [CodexComposerCapability] = []
+    ) -> [JSON] {
         let fileAttachments = attachments.filter { $0.kind == .file }
         let imageAttachments = attachments.filter { $0.kind == .image }
         var prompt = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -367,12 +498,33 @@ final class CodexAppServer: @unchecked Sendable {
             prompt = "请查看所附图片。"
         }
 
+        let markers = capabilities.map { "$\($0.invocationName)" }.joined(separator: " ")
+        if !markers.isEmpty {
+            prompt = prompt.isEmpty ? markers : "\(markers) \(prompt)"
+        }
+
         var items: [JSON] = []
         if !prompt.isEmpty {
             items.append(["type": "text", "text": prompt])
         }
         items.append(contentsOf: imageAttachments.map {
             ["type": "localImage", "path": $0.path]
+        })
+        items.append(contentsOf: capabilities.map { capability in
+            switch capability.kind {
+            case .skill:
+                return [
+                    "type": "skill",
+                    "name": capability.invocationName,
+                    "path": capability.path
+                ]
+            case .app:
+                return [
+                    "type": "mention",
+                    "name": capability.name,
+                    "path": capability.path
+                ]
+            }
         })
         return items
     }
@@ -394,22 +546,39 @@ final class CodexAppServer: @unchecked Sendable {
 
     func releaseThreadForExternalClient(
         threadID: String,
-        completion: @escaping @Sendable () -> Void
+        workingDirectory: String,
+        completion: @escaping @Sendable (Result<Void, Error>) -> Void
     ) {
+        // Older PinChat threads were created without a cwd. Resuming with the
+        // dedicated workspace repairs their persisted project context before Codex
+        // Desktop takes ownership, so the composer remains usable after handoff.
         sendRequest(
-            method: "thread/unsubscribe",
-            params: ["threadId": threadID]
-        ) { [weak self] _ in
-            guard let self else {
-                completion()
+            method: "thread/resume",
+            params: Self.threadResumeParameters(
+                threadID: threadID,
+                workingDirectory: workingDirectory
+            )
+        ) { [weak self] resumeResult in
+            guard let self else { return }
+            guard case .success = resumeResult else {
+                completion(resumeResult.map { _ in () })
                 return
             }
-            // `thread/unsubscribe` alone leaves an unsubscribe grace period. End the
-            // conversation process before launching Codex so the desktop app can take
-            // ownership immediately. The separate activity observer remains alive.
-            self.queue.async {
-                self.stopOnQueue()
-                completion()
+            self.sendRequest(
+                method: "thread/unsubscribe",
+                params: ["threadId": threadID]
+            ) { [weak self] unsubscribeResult in
+                guard let self else { return }
+                guard case .success = unsubscribeResult else {
+                    completion(unsubscribeResult.map { _ in () })
+                    return
+                }
+                // End the conversation process before launching Codex so the desktop
+                // app can take ownership immediately. The activity observer stays alive.
+                self.queue.async {
+                    self.stopOnQueue()
+                    completion(.success(()))
+                }
             }
         }
     }
@@ -420,17 +589,16 @@ final class CodexAppServer: @unchecked Sendable {
 
     private func prepareThread(
         existingThreadID: String?,
+        workingDirectory: String,
         completion: @escaping @Sendable (Result<String, Error>) -> Void
     ) {
         if let existingThreadID {
             sendRequest(
                 method: "thread/resume",
-                params: [
-                    "threadId": existingThreadID,
-                    "approvalPolicy": "never",
-                    "sandbox": "read-only",
-                    "excludeTurns": true
-                ]
+                params: Self.threadResumeParameters(
+                    threadID: existingThreadID,
+                    workingDirectory: workingDirectory
+                )
             ) { result in
                 completion(result.map { _ in existingThreadID })
             }
@@ -439,11 +607,7 @@ final class CodexAppServer: @unchecked Sendable {
 
         sendRequest(
             method: "thread/start",
-            params: [
-                "approvalPolicy": "never",
-                "sandbox": "read-only",
-                "ephemeral": false
-            ]
+            params: Self.threadStartParameters(workingDirectory: workingDirectory)
         ) { result in
             switch result {
             case .failure(let error):
@@ -457,6 +621,28 @@ final class CodexAppServer: @unchecked Sendable {
                 completion(.success(threadID))
             }
         }
+    }
+
+    static func threadStartParameters(workingDirectory: String) -> JSON {
+        [
+            "cwd": workingDirectory,
+            "approvalPolicy": "never",
+            "sandbox": "read-only",
+            "ephemeral": false
+        ]
+    }
+
+    static func threadResumeParameters(
+        threadID: String,
+        workingDirectory: String
+    ) -> JSON {
+        [
+            "threadId": threadID,
+            "cwd": workingDirectory,
+            "approvalPolicy": "never",
+            "sandbox": "read-only",
+            "excludeTurns": true
+        ]
     }
 
     private static func indexedThread(_ value: JSON) -> IndexedThread? {
@@ -555,7 +741,7 @@ final class CodexAppServer: @unchecked Sendable {
     }
 
     private static func lastTaskEvent(in data: Data) -> String? {
-        let needles = ["task_started", "task_complete", "turn_aborted"]
+        let needles = ["task_started", "task_complete", "turn_aborted", "turn_failed", "error"]
         let text = String(decoding: data, as: UTF8.self)
         return needles.compactMap { event -> (String, String.Index)? in
             let marker = "\"type\":\"event_msg\",\"payload\":{\"type\":\"\(event)\""
@@ -645,6 +831,9 @@ final class CodexAppServer: @unchecked Sendable {
             }
         case "account/updated":
             onAccountUpdated?()
+        case "app/list/updated":
+            let apps = Self.appCapabilities(from: params)
+            if !apps.isEmpty { onAppCapabilitiesUpdated?(apps) }
         case "item/started":
             guard let item = params["item"] as? JSON,
                   (item["type"] as? String) == "agentMessage",

@@ -68,23 +68,31 @@ final class AppModel: ObservableObject {
     @Published private(set) var connectionStatus: ConnectionStatus = .starting
     @Published private(set) var isGenerating = false
     @Published private(set) var lastTurnError: String?
-    @Published private(set) var desktopActivity: CodexTaskActivity?
+    @Published private(set) var desktopActivities: [CodexTaskActivity] = []
+    @Published private(set) var composerCapabilities: [CodexComposerCapability] = []
+    @Published private(set) var isLoadingComposerCapabilities = false
+    @Published private(set) var composerCapabilitiesError: String?
     @Published var alertMessage: String?
 
     private let chatService: CodexAppServer
     private let activityService: CodexAppServer
     private let store: SessionStore
+    private let conversationWorkingDirectory: String
     private var activeSessionID: UUID?
     private var activeAssistantMessageID: UUID?
     private var syncTask: Task<Void, Never>?
     private var syncInFlight = false
     private var desktopActivitySyncInFlight = false
+    private var composerCapabilitiesSyncInFlight = false
+    private var hasLoadedComposerCapabilities = false
     private var externalHandoffLifecycle = CodexExternalHandoffLifecycle()
 
     var selectedSession: ChatSession? {
         guard let selectedSessionID else { return nil }
         return sessions.first { $0.id == selectedSessionID }
     }
+
+    var desktopActivity: CodexTaskActivity? { desktopActivities.first }
 
     var latestUserText: String {
         selectedSession?.messages.last(where: { $0.role == .user })?.text ?? ""
@@ -105,13 +113,16 @@ final class AppModel: ObservableObject {
     init(
         chatService: CodexAppServer = CodexAppServer(purpose: .conversation),
         activityService: CodexAppServer = CodexAppServer(purpose: .desktopActivityObserver),
-        store: SessionStore = SessionStore()
+        store: SessionStore = SessionStore(),
+        conversationWorkingDirectory: String? = nil
     ) {
         precondition(chatService.purpose == .conversation)
         precondition(activityService.purpose == .desktopActivityObserver)
         self.chatService = chatService
         self.activityService = activityService
         self.store = store
+        self.conversationWorkingDirectory = conversationWorkingDirectory
+            ?? PinChatConversationWorkspace.prepare()
         let loaded = store.load().sorted { $0.updatedAt > $1.updatedAt }
         sessions = loaded
         selectedSessionID = loaded.first?.id
@@ -154,6 +165,16 @@ final class AppModel: ObservableObject {
         activityService.onProcessStopped = { [weak self] _ in
             Task { @MainActor in self?.desktopActivitySyncInFlight = false }
         }
+        activityService.onAppCapabilitiesUpdated = { [weak self] apps in
+            Task { @MainActor in
+                guard let self else { return }
+                let skills = self.composerCapabilities.filter { $0.kind == .skill }
+                self.composerCapabilities = skills + apps
+                self.hasLoadedComposerCapabilities = true
+                self.isLoadingComposerCapabilities = false
+                self.composerCapabilitiesError = nil
+            }
+        }
     }
 
     func start() {
@@ -182,7 +203,7 @@ final class AppModel: ObservableObject {
     private func startActivityService() {
         activityService.start { [weak self] result in
             guard case .success = result else { return }
-            Task { @MainActor in self?.syncLatestDesktopTask() }
+            Task { @MainActor in self?.syncDesktopTasks() }
         }
     }
 
@@ -263,7 +284,11 @@ final class AppModel: ObservableObject {
         persist()
     }
 
-    func send(_ rawText: String, attachments: [ChatAttachment] = []) {
+    func send(
+        _ rawText: String,
+        attachments: [ChatAttachment] = [],
+        capabilities: [CodexComposerCapability] = []
+    ) {
         let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !attachments.isEmpty, !isGenerating else { return }
         guard canSend else {
@@ -283,7 +308,8 @@ final class AppModel: ObservableObject {
         let userMessage = ChatMessage(
             role: .user,
             text: visibleText,
-            attachments: attachments.isEmpty ? nil : attachments
+            attachments: attachments.isEmpty ? nil : attachments,
+            capabilities: capabilities.isEmpty ? nil : capabilities
         )
         let assistantMessage = ChatMessage(role: .assistant, text: "")
         sessions[index].messages.append(contentsOf: [userMessage, assistantMessage])
@@ -305,6 +331,8 @@ final class AppModel: ObservableObject {
         chatService.sendMessage(
             text: text,
             attachments: attachments,
+            capabilities: capabilities,
+            workingDirectory: conversationWorkingDirectory,
             existingThreadID: existingThreadID,
             onThreadReady: { [weak self] threadID in
                 Task { @MainActor in self?.attach(threadID: threadID, to: sessionID) }
@@ -331,20 +359,51 @@ final class AppModel: ObservableObject {
         start()
     }
 
+    func refreshDesktopActivities() {
+        syncDesktopTasks()
+    }
+
+    func refreshComposerCapabilities(force: Bool = false) {
+        guard !composerCapabilitiesSyncInFlight else { return }
+        guard force || !hasLoadedComposerCapabilities else { return }
+        composerCapabilitiesSyncInFlight = true
+        isLoadingComposerCapabilities = true
+        composerCapabilitiesError = nil
+        activityService.readComposerCapabilities(
+            cwd: FileManager.default.homeDirectoryForCurrentUser.path
+        ) { [weak self] result in
+            Task { @MainActor in
+                guard let self else { return }
+                self.composerCapabilitiesSyncInFlight = false
+                self.isLoadingComposerCapabilities = false
+                switch result {
+                case .success(let capabilities):
+                    self.hasLoadedComposerCapabilities = true
+                    self.composerCapabilities = capabilities
+                case .failure(let error):
+                    self.composerCapabilitiesError = error.localizedDescription
+                }
+            }
+        }
+    }
+
     func releaseCurrentConversationForCodex(
-        completion: @escaping @MainActor @Sendable () -> Void
+        completion: @escaping @MainActor @Sendable (Result<Void, Error>) -> Void
     ) {
         guard let threadID = selectedSession?.codexThreadID else {
-            completion()
+            completion(.success(()))
             return
         }
         externalHandoffLifecycle.beginHandoff()
         connectionStatus = .starting
-        chatService.releaseThreadForExternalClient(threadID: threadID) { [weak self] in
+        chatService.releaseThreadForExternalClient(
+            threadID: threadID,
+            workingDirectory: conversationWorkingDirectory
+        ) { [weak self] result in
             Task { @MainActor in
                 guard let self else { return }
                 self.syncInFlight = false
-                completion()
+                completion(result)
             }
         }
     }
@@ -381,25 +440,25 @@ final class AppModel: ObservableObject {
     private func startSyncLoop() {
         syncTask?.cancel()
         syncTask = Task { [weak self] in
-            self?.syncLatestDesktopTask()
+            self?.syncDesktopTasks()
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(1.25))
                 guard !Task.isCancelled else { break }
                 self?.syncCurrentConversation()
-                self?.syncLatestDesktopTask()
+                self?.syncDesktopTasks()
             }
         }
     }
 
-    private func syncLatestDesktopTask() {
+    private func syncDesktopTasks() {
         guard !desktopActivitySyncInFlight else { return }
         desktopActivitySyncInFlight = true
-        activityService.readLatestDesktopTask { [weak self] result in
+        activityService.readDesktopTasks(limit: PinChatVisualMetrics.maximumVisibleDesktopTasks) { [weak self] result in
             Task { @MainActor in
                 guard let self else { return }
                 self.desktopActivitySyncInFlight = false
-                if case .success(let activity) = result {
-                    self.desktopActivity = activity
+                if case .success(let activities) = result {
+                    self.desktopActivities = activities
                 }
             }
         }

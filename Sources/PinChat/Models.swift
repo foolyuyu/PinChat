@@ -1,6 +1,27 @@
 import Foundation
 import UniformTypeIdentifiers
 
+enum PinChatConversationWorkspace {
+    static func directoryURL(baseDirectory: URL? = nil) -> URL {
+        let root = baseDirectory ?? FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first!
+        return root
+            .appendingPathComponent("PinChat", isDirectory: true)
+            .appendingPathComponent("Workspace", isDirectory: true)
+    }
+
+    static func prepare(baseDirectory: URL? = nil) -> String {
+        let url = directoryURL(baseDirectory: baseDirectory)
+        try? FileManager.default.createDirectory(
+            at: url,
+            withIntermediateDirectories: true
+        )
+        return url.path
+    }
+}
+
 enum ChatRole: String, Codable, Sendable {
     case user
     case assistant
@@ -34,6 +55,7 @@ enum CodexTaskState: String, Equatable, Sendable {
     case waiting
     case completed
     case stopped
+    case failed
 
     var isInProgress: Bool {
         self == .thinking || self == .waiting
@@ -45,6 +67,36 @@ struct CodexTaskActivity: Equatable, Sendable {
     var title: String
     var state: CodexTaskState
     var updatedAt: Date
+
+    var id: String { threadID }
+}
+
+enum CodexTaskActivityOrdering {
+    static let completedVisibilityDuration: TimeInterval = 30
+
+    static func visible(
+        from activities: [CodexTaskActivity],
+        limit: Int,
+        now: Date = Date()
+    ) -> [CodexTaskActivity] {
+        guard limit > 0 else { return [] }
+        var seen = Set<String>()
+        let unique = activities
+            .filter { seen.insert($0.threadID).inserted }
+            .sorted { $0.updatedAt > $1.updatedAt }
+
+        let active = unique.filter { $0.state.isInProgress }
+        let failures = unique.filter { $0.state == .failed }
+        let recentlyResolved = unique.filter {
+            ($0.state == .completed || $0.state == .stopped) &&
+            now.timeIntervalSince($0.updatedAt) <= completedVisibilityDuration
+        }
+
+        // Active work is the useful persistent signal. A failure remains visible for
+        // attention, while completed/stopped work is a short-lived receipt rather than
+        // an ever-growing history list.
+        return Array((active + failures.prefix(1) + recentlyResolved.prefix(1)).prefix(limit))
+    }
 }
 
 enum CodexTaskEventReducer {
@@ -56,16 +108,53 @@ enum CodexTaskEventReducer {
         if serverStatus == "active" {
             return activeFlags.isEmpty ? .thinking : .waiting
         }
+        if serverStatus == "systemError" { return .failed }
 
         for event in eventTypes.reversed() {
             switch event {
             case "task_started": return .thinking
             case "task_complete": return .completed
             case "turn_aborted": return .stopped
+            case "turn_failed", "error": return .failed
             default: continue
             }
         }
         return .completed
+    }
+}
+
+enum CodexComposerCapabilityKind: String, Codable, Hashable, Sendable {
+    case skill
+    case app
+}
+
+struct CodexComposerCapability: Identifiable, Codable, Hashable, Sendable {
+    var kind: CodexComposerCapabilityKind
+    var name: String
+    var summary: String
+    var path: String
+    var invocationName: String
+    var iconPath: String?
+    var brandColorHex: String?
+
+    var id: String { "\(kind.rawValue):\(path)" }
+
+    init(
+        kind: CodexComposerCapabilityKind,
+        name: String,
+        summary: String,
+        path: String,
+        invocationName: String,
+        iconPath: String? = nil,
+        brandColorHex: String? = nil
+    ) {
+        self.kind = kind
+        self.name = name
+        self.summary = summary
+        self.path = path
+        self.invocationName = invocationName
+        self.iconPath = iconPath
+        self.brandColorHex = brandColorHex
     }
 }
 
@@ -76,6 +165,7 @@ struct ChatMessage: Identifiable, Codable, Hashable, Sendable {
     var text: String
     var createdAt: Date
     var attachments: [ChatAttachment]?
+    var capabilities: [CodexComposerCapability]?
 
     init(
         id: UUID = UUID(),
@@ -83,7 +173,8 @@ struct ChatMessage: Identifiable, Codable, Hashable, Sendable {
         role: ChatRole,
         text: String,
         createdAt: Date = Date(),
-        attachments: [ChatAttachment]? = nil
+        attachments: [ChatAttachment]? = nil,
+        capabilities: [CodexComposerCapability]? = nil
     ) {
         self.id = id
         self.sourceID = sourceID
@@ -91,6 +182,7 @@ struct ChatMessage: Identifiable, Codable, Hashable, Sendable {
         self.text = text
         self.createdAt = createdAt
         self.attachments = attachments
+        self.capabilities = capabilities
     }
 }
 

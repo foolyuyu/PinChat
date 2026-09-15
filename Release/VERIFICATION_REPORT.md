@@ -1,28 +1,33 @@
-# PinChat 2.4 附件与纯净表面版验证报告
+# PinChat 2.5 多任务与官方能力菜单版验证报告
 
 验证日期：2026-09-15（Asia/Shanghai）
 
 ## 交付物
 
-- `PinChat.app`：macOS 14+、Apple Silicon、本机 ad-hoc 签名的可运行应用，版本 0.2.4（6）。
+- `PinChat.app`：macOS 14+、Apple Silicon、本机 ad-hoc 签名的可运行应用，版本 0.2.5（7）。
 - `PinChat-source.zip`：完整 Swift Package / Xcode 工程源码，不含 Git、构建缓存和应用产物。
-- v1.0、v1.1、v2.0、v2.1、v2.2、v2.3、v2.4 七份只读冻结需求及各自 SHA-256 校验文件。
+- v1.0、v1.1、v2.0、v2.1、v2.2、v2.3、v2.4、v2.5 八份只读冻结需求及各自 SHA-256 校验文件。
 - v2.1 冻结需求 SHA-256：`6636da523138b5b19b64c4889f063bc7cf687cec387ff4417e924b7e4a8d7427`。
 - v2.2 冻结需求 SHA-256：`2fb38fd3a99e5214582154f2f1ea314def43c6414e6023c50733bc1e47d5d46c`。
 - v2.3 冻结需求 SHA-256：`1165cc5dfd2048c83cf1706dfb2812ae0c58c1700dcbe6d8a8e869e4811bbbe6`。
 - v2.4 冻结需求 SHA-256：`f168c3b480faab81a0ac63dea7e45e5cf294fef82e21951712738f4ebe3ea6a4`。
+- v2.5 冻结需求 SHA-256：`499a9d4987d738c7141a30d3d41b038bc38828f5c328b2d0a01b46ab0737f61c`。
 
 ## 构建与自动测试
 
-- `swift test`：30 项测试全部通过。
+- `swift test`：34 项测试全部通过。
 - `xcodebuild -scheme PinChat -destination platform=macOS ... build`：通过。
 - Release 构建：通过。
 - `plutil -lint`：通过。
 - `codesign --verify --deep --strict`：通过。
-- v1.0 至 v2.4 全部冻结需求 SHA-256 校验：通过。
+- v1.0 至 v2.5 全部冻结需求 SHA-256 校验：通过。
 
 新增测试覆盖：
 
+- 最多 5 个任务的去重、进行中优先和更新时间排序，且每个任务保留独立状态。
+- `systemError` 到失败状态的归约，以及 1 至 5 项任务面板的动态高度上限。
+- App Server 技能、可访问应用和已安装可调用应用的解析过滤。
+- 官方 `skill` / `mention` 输入项、调用标记与能力元数据持久化兼容。
 - App Server 将照片映射为 `localImage`，将普通文件路径拼入只读本机上下文，并支持仅图片提交。
 - 附件元数据持久化与旧版无附件 `sessions.json` 的向后兼容解码。
 - 带附件输入框的 360×88 pt 动态尺寸，以及紧凑表面 0 pt 外圈透明 inset。
@@ -74,6 +79,15 @@
 - 图片按官方 App Server `localImage` 输入发送；普通文件和文件夹只发送用户选择的绝对路径，保持只读 sandbox，不复制或修改源文件。
 - 已选附件以横向可移除标签展示，输入框从 360×50 pt 自动扩展为 360×88 pt；允许无文字、仅附件发送。
 - 输入框和状态卡移除了外围 4 pt 透明 padding、灰色细描边和透底材质，圆角实色表面直接贴合无边框窗口。
+
+## 多任务与官方能力菜单
+
+- 桌宠悬停面板同时显示最多 5 个近期 Codex 桌面任务；正在思考或等待操作的任务排在已完成、已停止和失败任务之前。
+- 每项任务分别展示标题与真实状态，并将右侧跳转按钮绑定到该项自己的 Codex thread ID。
+- 任务数量变化时面板由 66 pt 动态增高，最多 286 pt，并继续根据桌宠位置向可用空间展开。
+- `+` 菜单通过 `skills/list` 读取本机技能，通过 `app/installed` 立即读取可调用应用，并用 `app/list` 更新名称与说明。
+- 技能与应用可选择、取消和以标签移除；发送时分别映射为官方 `skill` 与 `mention` 输入项。
+- 官方 App Server 未公开 ChatGPT 历史对话附加协议，本版不提供无效的仿制入口。
 
 ## 安全与边界
 

@@ -30,11 +30,24 @@ import Testing
 
     let store = SessionStore(baseDirectory: directory)
     let attachment = ChatAttachment(url: URL(fileURLWithPath: "/tmp/reference.png"))
-    let message = ChatMessage(role: .user, text: "查看附件", attachments: [attachment])
+    let capability = CodexComposerCapability(
+        kind: .skill,
+        name: "PDF",
+        summary: "Read PDFs",
+        path: "/tmp/pdf/SKILL.md",
+        invocationName: "pdf:pdf"
+    )
+    let message = ChatMessage(
+        role: .user,
+        text: "查看附件",
+        attachments: [attachment],
+        capabilities: [capability]
+    )
     try store.save([ChatSession(messages: [message])])
 
     let loaded = try #require(store.load().first?.messages.first)
     #expect(loaded.attachments == [attachment])
+    #expect(loaded.capabilities == [capability])
 
     let legacyJSON = """
     [{"id":"00000000-0000-0000-0000-000000000001","title":"旧会话","createdAt":"2026-09-15T00:00:00Z","updatedAt":"2026-09-15T00:00:00Z","messages":[{"id":"00000000-0000-0000-0000-000000000002","role":"user","text":"旧消息","createdAt":"2026-09-15T00:00:00Z"}]}]
@@ -43,6 +56,7 @@ import Testing
     decoder.dateDecodingStrategy = .iso8601
     let legacy = try decoder.decode([ChatSession].self, from: Data(legacyJSON.utf8))
     #expect(legacy.first?.messages.first?.attachments == nil)
+    #expect(legacy.first?.messages.first?.capabilities == nil)
 }
 
 @Test func codexTurnInputMapsImagesAndFiles() throws {
@@ -68,6 +82,105 @@ import Testing
     #expect(items.count == 2)
     #expect(items[0]["text"] as? String == "请查看所附图片。")
     #expect(items[1]["type"] as? String == "localImage")
+}
+
+@Test func codexTurnInputMapsSkillsAndAppsUsingOfficialItems() throws {
+    let skill = CodexComposerCapability(
+        kind: .skill,
+        name: "PDF",
+        summary: "Read PDFs",
+        path: "/tmp/pdf/SKILL.md",
+        invocationName: "pdf:pdf"
+    )
+    let app = CodexComposerCapability(
+        kind: .app,
+        name: "Sites",
+        summary: "Build sites",
+        path: "app://connector-sites",
+        invocationName: "connector-sites"
+    )
+
+    let items = CodexAppServer.turnInputItems(
+        text: "处理这个请求",
+        attachments: [],
+        capabilities: [skill, app]
+    )
+
+    #expect(items.count == 3)
+    let text = try #require(items[0]["text"] as? String)
+    #expect(text.hasPrefix("$pdf:pdf $connector-sites "))
+    #expect(items[1]["type"] as? String == "skill")
+    #expect(items[1]["name"] as? String == "pdf:pdf")
+    #expect(items[1]["path"] as? String == "/tmp/pdf/SKILL.md")
+    #expect(items[2]["type"] as? String == "mention")
+    #expect(items[2]["path"] as? String == "app://connector-sites")
+}
+
+@Test func composerCapabilitiesParseOnlyUsableServerResults() {
+    let skillsPayload: CodexAppServer.JSON = [
+        "data": [[
+            "cwd": "/tmp",
+            "skills": [[
+                "name": "pdf:pdf",
+                "description": "Long description",
+                "path": "/skills/pdf/SKILL.md",
+                "enabled": true,
+                "interface": [
+                    "displayName": "PDF",
+                    "shortDescription": "Read PDFs"
+                ]
+            ], [
+                "name": "disabled",
+                "path": "/skills/disabled/SKILL.md",
+                "enabled": false
+            ]]
+        ]]
+    ]
+    let appsPayload: CodexAppServer.JSON = [
+        "data": [[
+            "id": "connector-sites",
+            "name": "Sites",
+            "description": "Build sites",
+            "isAccessible": true,
+            "isEnabled": true
+        ], [
+            "id": "connector-disabled",
+            "name": "Disabled",
+            "isAccessible": true,
+            "isEnabled": false
+        ]]
+    ]
+
+    let skills = CodexAppServer.skillCapabilities(from: skillsPayload)
+    let apps = CodexAppServer.appCapabilities(from: appsPayload)
+    #expect(skills.map(\.name) == ["PDF"])
+    #expect(skills.map(\.invocationName) == ["pdf:pdf"])
+    #expect(apps.map(\.name) == ["Sites"])
+    #expect(apps.map(\.path) == ["app://connector-sites"])
+}
+
+@Test func installedAppsRequireEnabledAndCallableState() {
+    let payload: CodexAppServer.JSON = [
+        "apps": [[
+            "id": "connector-ready",
+            "runtimeName": "Ready",
+            "enabled": true,
+            "callable": true
+        ], [
+            "id": "connector-disabled",
+            "runtimeName": "Disabled",
+            "enabled": false,
+            "callable": true
+        ], [
+            "id": "connector-blocked",
+            "runtimeName": "Blocked",
+            "enabled": true,
+            "callable": false
+        ]]
+    ]
+
+    let apps = CodexAppServer.installedAppCapabilities(from: payload)
+    #expect(apps.map(\.name) == ["Ready"])
 }
 
 @Test func planNamesAreReadable() {
@@ -153,11 +266,31 @@ import Testing
     #expect(url.lastPathComponent == threadID)
 }
 
+@Test func codexThreadsAlwaysCarryARealWorkingDirectory() throws {
+    let base = FileManager.default.temporaryDirectory
+        .appendingPathComponent("PinChatWorkspaceTests-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: base) }
+
+    let directory = PinChatConversationWorkspace.prepare(baseDirectory: base)
+    var isDirectory: ObjCBool = false
+    #expect(FileManager.default.fileExists(atPath: directory, isDirectory: &isDirectory))
+    #expect(isDirectory.boolValue)
+
+    let start = CodexAppServer.threadStartParameters(workingDirectory: directory)
+    let resume = CodexAppServer.threadResumeParameters(
+        threadID: "thread-1",
+        workingDirectory: directory
+    )
+    #expect(start["cwd"] as? String == directory)
+    #expect(resume["cwd"] as? String == directory)
+    #expect(resume["threadId"] as? String == "thread-1")
+}
+
 @Test func visualMetricsRemainSmallerThanOfficialPetReference() {
     #expect(PinChatVisualMetrics.petArtworkSize.width == 52)
     #expect(PinChatVisualMetrics.petArtworkSize.width < 60)
     #expect(PinChatVisualMetrics.petSize == NSSize(width: 64, height: 64))
-    #expect(PinChatVisualMetrics.composerActionSize == 30)
+    #expect(PinChatVisualMetrics.composerActionSize == 26)
     #expect(PinChatVisualMetrics.statusActionSize == 28)
     #expect(PinChatVisualMetrics.answerToolbarActionSize == 24)
 }
@@ -185,6 +318,71 @@ import Testing
         serverStatus: "active",
         activeFlags: ["waitingOnUserInput"]
     ) == .waiting)
+    #expect(CodexTaskEventReducer.state(
+        eventTypes: ["task_started"],
+        serverStatus: "systemError"
+    ) == .failed)
+}
+
+@Test func desktopTasksKeepIndependentStatesAndPrioritizeActiveWork() {
+    let now = Date()
+    let activities = [
+        CodexTaskActivity(
+            threadID: "completed-newest",
+            title: "最近完成",
+            state: .completed,
+            updatedAt: now
+        ),
+        CodexTaskActivity(
+            threadID: "thinking",
+            title: "仍在思考",
+            state: .thinking,
+            updatedAt: now.addingTimeInterval(-20)
+        ),
+        CodexTaskActivity(
+            threadID: "waiting",
+            title: "等待操作",
+            state: .waiting,
+            updatedAt: now.addingTimeInterval(-10)
+        ),
+        CodexTaskActivity(
+            threadID: "completed-newest",
+            title: "重复项",
+            state: .failed,
+            updatedAt: now.addingTimeInterval(10)
+        )
+    ]
+
+    let visible = CodexTaskActivityOrdering.visible(from: activities, limit: 3, now: now)
+    #expect(visible.map(\.threadID) == ["waiting", "thinking", "completed-newest"])
+    #expect(visible.map(\.state) == [.waiting, .thinking, .completed])
+}
+
+@Test func completedDesktopTasksAreBriefAndNeverAccumulate() {
+    let now = Date()
+    let activities = [
+        CodexTaskActivity(
+            threadID: "completed-recent",
+            title: "刚刚完成",
+            state: .completed,
+            updatedAt: now.addingTimeInterval(-5)
+        ),
+        CodexTaskActivity(
+            threadID: "completed-second",
+            title: "第二个完成项",
+            state: .completed,
+            updatedAt: now.addingTimeInterval(-8)
+        ),
+        CodexTaskActivity(
+            threadID: "completed-old",
+            title: "较早完成",
+            state: .completed,
+            updatedAt: now.addingTimeInterval(-60)
+        )
+    ]
+
+    let visible = CodexTaskActivityOrdering.visible(from: activities, limit: 5, now: now)
+    #expect(visible.map(\.threadID) == ["completed-recent"])
 }
 
 @Test func hoverTimingAvoidsAccidentalFlyoversAndVisibleGaps() {
@@ -194,11 +392,15 @@ import Testing
 }
 
 @Test func compactPanelsMatchFrozenV21Targets() {
-    #expect(PinChatVisualMetrics.composerSize == NSSize(width: 360, height: 50))
-    #expect(PinChatVisualMetrics.statusSize == NSSize(width: 410, height: 66))
+    #expect(PinChatVisualMetrics.composerSize == NSSize(width: 334, height: 40))
+    #expect(PinChatVisualMetrics.statusSize == NSSize(width: 360, height: 72))
     #expect(PinChatVisualMetrics.attachmentGap == 3)
-    #expect(PinChatVisualMetrics.composerAttachmentSize == NSSize(width: 360, height: 88))
-    #expect(PinChatVisualMetrics.compactSurfaceOuterInset == 0)
+    #expect(PinChatVisualMetrics.composerAttachmentSize == NSSize(width: 334, height: 78))
+    #expect(PinChatVisualMetrics.composerSurfaceOuterInset == 0)
+    #expect(PinChatVisualMetrics.compactSurfaceOuterInset == 7)
+    #expect(PinChatVisualMetrics.desktopStatusSize(taskCount: 1).height == 70)
+    #expect(PinChatVisualMetrics.desktopStatusSize(taskCount: 5).height == 258)
+    #expect(PinChatVisualMetrics.desktopStatusSize(taskCount: 99).height == 258)
 }
 
 @Test func floatingButtonSnapsToNearestScreenEdge() {

@@ -136,18 +136,37 @@ enum PanelPresentationPolicy {
 enum PinChatVisualMetrics {
     static let petSize = NSSize(width: 64, height: 64)
     static let petArtworkSize = NSSize(width: 52, height: 56)
-    static let composerSize = NSSize(width: 360, height: 50)
-    static let composerAttachmentSize = NSSize(width: 360, height: 88)
-    static let composerActionSize: CGFloat = 30
-    static let statusSize = NSSize(width: 410, height: 66)
+    static let composerSize = NSSize(width: 334, height: 40)
+    static let composerAttachmentSize = NSSize(width: 334, height: 78)
+    static let composerContentHeight: CGFloat = 40
+    static let composerSurfaceOuterInset: CGFloat = 0
+    static let composerActionSize: CGFloat = 26
+    static let statusSize = NSSize(width: 360, height: 72)
+    static let statusContentHeight: CGFloat = 58
+    static let desktopTaskRowHeight: CGFloat = 46
+    static let maximumVisibleDesktopTasks = 5
     static let statusActionSize: CGFloat = 28
     static let answerSize = NSSize(width: 520, height: 420)
     static let answerToolbarActionSize: CGFloat = 24
     static let followUpActionSize: CGFloat = 30
-    static let compactSurfaceOuterInset: CGFloat = 0
+    static let compactSurfaceOuterInset: CGFloat = 7
     static let attachmentGap: CGFloat = 3
     static let hoverRevealDelay: TimeInterval = 0.32
     static let hoverDismissDelay: TimeInterval = 0.20
+
+    static func desktopStatusSize(taskCount: Int) -> NSSize {
+        NSSize(
+            width: statusSize.width,
+            height: compactSurfaceOuterInset * 2
+                + desktopStatusContentHeight(taskCount: taskCount)
+        )
+    }
+
+    static func desktopStatusContentHeight(taskCount: Int) -> CGFloat {
+        let visibleCount = max(1, min(maximumVisibleDesktopTasks, taskCount))
+        let dividerHeight = CGFloat(max(0, visibleCount - 1))
+        return 10 + desktopTaskRowHeight * CGFloat(visibleCount) + dividerHeight
+    }
 }
 
 final class ChatPanel: NSPanel {
@@ -335,7 +354,11 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
         }
     }
 
-    func sendMessage(_ text: String, attachments: [ChatAttachment] = []) {
+    func sendMessage(
+        _ text: String,
+        attachments: [ChatAttachment] = [],
+        capabilities: [CodexComposerCapability] = []
+    ) {
         guard model.account != nil else {
             showComposer()
             model.alertMessage = PinChatError.notSignedIn.localizedDescription
@@ -347,7 +370,7 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
         statusContext = .conversation
         composerPanel?.orderOut(nil)
         answerPanel?.orderOut(nil)
-        model.send(text, attachments: attachments)
+        model.send(text, attachments: attachments, capabilities: capabilities)
         positionAttachedPanels()
         if let statusPanel { revealWithLift(statusPanel) }
     }
@@ -355,9 +378,15 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
     func setComposerHasAttachments(_ hasAttachments: Bool) {
         guard composerHasAttachments != hasAttachments else { return }
         composerHasAttachments = hasAttachments
+        composerPanel?.invalidateShadow()
         if isComposerVisible {
             positionAttachedPanels(animated: true)
         }
+    }
+
+    func refreshDesktopActivityPanelLayout() {
+        guard isDesktopActivityStatus, isStatusVisible else { return }
+        positionAttachedPanels(animated: true)
     }
 
     func captureInteractiveScreenshot(
@@ -462,9 +491,16 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
             return
         }
         codexHandoffInProgress = true
-        model.releaseCurrentConversationForCodex { [weak self] in
+        model.releaseCurrentConversationForCodex { [weak self] result in
             guard let self else { return }
             self.codexHandoffInProgress = false
+            guard case .success = result else {
+                self.model.recoverAfterExternalHandoffFailure()
+                if case .failure(let error) = result {
+                    self.model.alertMessage = "无法准备可续聊的 Codex 任务：\(error.localizedDescription)"
+                }
+                return
+            }
             guard NSWorkspace.shared.open(url) else {
                 self.model.recoverAfterExternalHandoffFailure()
                 self.model.alertMessage = "无法打开 Codex。请确认 ChatGPT 桌面应用已安装。"
@@ -475,8 +511,7 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
         }
     }
 
-    func openDesktopActivityInCodex() {
-        guard let threadID = model.desktopActivity?.threadID else { return }
+    func openDesktopActivityInCodex(_ threadID: String) {
         if model.selectedSession?.codexThreadID == threadID {
             openCurrentConversationInCodex()
             return
@@ -484,10 +519,16 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
         openCodexThread(threadID)
     }
 
+    func openDesktopActivityInCodex() {
+        guard let threadID = model.desktopActivity?.threadID else { return }
+        openDesktopActivityInCodex(threadID)
+    }
+
     func petHoverChanged(_ hovering: Bool) {
         petHovered = hovering
         if hovering {
             hoverDismissTask?.cancel()
+            model.refreshDesktopActivities()
             guard !isDraggingPet,
                   !isComposerVisible,
                   !isAnswerVisible,
@@ -641,8 +682,9 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
-        configureFloating(panel, hasShadow: false)
+        configureFloating(panel, hasShadow: true)
         install(MiniComposerView(model: model, controller: self), in: panel)
+        panel.invalidateShadow()
         composerPanel = panel
     }
 
@@ -903,7 +945,13 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
             )
         } else if isStatusVisible, let statusPanel {
             panels.append(statusPanel)
-            sizes.append(PinChatVisualMetrics.statusSize)
+            sizes.append(
+                isDesktopActivityStatus
+                    ? PinChatVisualMetrics.desktopStatusSize(
+                        taskCount: model.desktopActivities.count
+                    )
+                    : PinChatVisualMetrics.statusSize
+            )
             if isAnswerVisible, !answerDetached, let answerPanel {
                 panels.append(answerPanel)
                 sizes.append(answerPanel.frame.size)

@@ -2,6 +2,80 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
+private struct BehindWindowGlass: NSViewRepresentable {
+    var material: NSVisualEffectView.Material = .popover
+    var opacity: CGFloat = 1
+
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.blendingMode = .behindWindow
+        view.state = .active
+        view.isEmphasized = false
+        view.material = material
+        view.alphaValue = opacity
+        return view
+    }
+
+    func updateNSView(_ view: NSVisualEffectView, context: Context) {
+        view.blendingMode = .behindWindow
+        view.state = .active
+        view.isEmphasized = false
+        view.material = material
+        view.alphaValue = opacity
+    }
+}
+
+private struct CompactFloatingSurface: ViewModifier {
+    let cornerRadius: CGFloat
+    @Environment(\.colorScheme) private var colorScheme
+
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        content
+            .background {
+                ZStack {
+                    BehindWindowGlass()
+                        .clipShape(shape)
+                    shape.fill(
+                        LinearGradient(
+                            colors: [
+                                Color.white.opacity(colorScheme == .dark ? 0.08 : 0.10),
+                                Color.white.opacity(colorScheme == .dark ? 0.035 : 0.04)
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+                }
+            }
+            .overlay {
+                shape.strokeBorder(
+                    LinearGradient(
+                        colors: [
+                            Color.white.opacity(colorScheme == .dark ? 0.40 : 0.66),
+                            Color.white.opacity(colorScheme == .dark ? 0.10 : 0.18),
+                            Color.black.opacity(colorScheme == .dark ? 0.12 : 0.045)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    ),
+                    lineWidth: 0.8
+                )
+            }
+            .shadow(
+                color: Color.black.opacity(colorScheme == .dark ? 0.14 : 0.045),
+                radius: 1.5,
+                y: 1
+            )
+    }
+}
+
+private extension View {
+    func compactFloatingSurface(cornerRadius: CGFloat) -> some View {
+        modifier(CompactFloatingSurface(cornerRadius: cornerRadius))
+    }
+}
+
 struct PetRootView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var controller: AppController
@@ -9,7 +83,8 @@ struct PetRootView: View {
     private var animation: PetAnimation {
         PetAnimation.resolve(
             isDragging: controller.isDraggingPet,
-            isGenerating: model.isGenerating || model.desktopActivity?.state.isInProgress == true,
+            isGenerating: model.isGenerating
+                || model.desktopActivities.contains(where: { $0.state.isInProgress }),
             hasError: model.lastTurnError != nil,
             hasAnswer: !model.latestAssistantText.isEmpty
         )
@@ -50,15 +125,15 @@ struct MiniComposerView: View {
     var body: some View {
         VStack(spacing: 0) {
             if !attachments.isEmpty {
-                attachmentStrip
+                supplementaryStrip
             }
 
-            HStack(spacing: 8) {
+            HStack(spacing: 7) {
                 attachmentMenu
 
                 TextField(placeholder, text: $draft, axis: .vertical)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 15, weight: .regular))
+                    .font(.system(size: 13, weight: .regular))
                     .lineLimit(1...2)
                     .focused($focused)
                     .disabled(!model.canSend || model.isGenerating)
@@ -90,22 +165,19 @@ struct MiniComposerView: View {
                     .opacity(canSubmit ? 1 : 0.62)
                 }
             }
-            .padding(.horizontal, 8)
-            .frame(height: PinChatVisualMetrics.composerSize.height)
+            .padding(.horizontal, 7)
+            .frame(height: PinChatVisualMetrics.composerContentHeight)
         }
+        .frame(maxWidth: .infinity)
+        .compactFloatingSurface(cornerRadius: 20)
+        .padding(PinChatVisualMetrics.composerSurfaceOuterInset)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(
-            Color(nsColor: .windowBackgroundColor),
-            in: RoundedRectangle(cornerRadius: 25, style: .continuous)
-        )
-        .padding(PinChatVisualMetrics.compactSurfaceOuterInset)
-        .shadow(color: .black.opacity(0.13), radius: 8, y: 3)
         .onAppear { focusSoon() }
         .onChange(of: controller.isComposerVisible) {
             if controller.isComposerVisible { focusSoon() }
         }
         .onChange(of: attachments.isEmpty) {
-            controller.setComposerHasAttachments(!attachments.isEmpty)
+            updateComposerHeight()
         }
         .onExitCommand { controller.hideComposer() }
     }
@@ -128,7 +200,7 @@ struct MiniComposerView: View {
             .help("添加附件")
             .accessibilityLabel("添加附件")
             .popover(isPresented: $showsAttachmentMenu, arrowEdge: .bottom) {
-                VStack(spacing: 2) {
+                VStack(alignment: .leading, spacing: 2) {
                     attachmentAction("添加文件和文件夹…", systemName: "doc.badge.plus") {
                         showsAttachmentMenu = false
                         chooseAttachments(photosOnly: false)
@@ -137,7 +209,6 @@ struct MiniComposerView: View {
                         showsAttachmentMenu = false
                         chooseAttachments(photosOnly: true)
                     }
-                    Divider().padding(.vertical, 3)
                     attachmentAction("截屏…", systemName: "camera.viewfinder") {
                         showsAttachmentMenu = false
                         controller.captureInteractiveScreenshot { url in
@@ -145,8 +216,8 @@ struct MiniComposerView: View {
                         }
                     }
                 }
-                .padding(6)
-                .frame(width: 226)
+                .padding(7)
+                .frame(width: 260)
             }
         }
     }
@@ -178,7 +249,7 @@ struct MiniComposerView: View {
             .background(Color.primary.opacity(0.055), in: Circle())
     }
 
-    private var attachmentStrip: some View {
+    private var supplementaryStrip: some View {
         ScrollView(.horizontal) {
             HStack(spacing: 6) {
                 ForEach(attachments) { attachment in
@@ -226,6 +297,10 @@ struct MiniComposerView: View {
         model.canSend && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty)
     }
 
+    private func updateComposerHeight() {
+        controller.setComposerHasAttachments(!attachments.isEmpty)
+    }
+
     private func chooseAttachments(photosOnly: Bool) {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
@@ -257,7 +332,10 @@ struct MiniComposerView: View {
         let selectedAttachments = attachments
         draft = ""
         attachments = []
-        controller.sendMessage(text, attachments: selectedAttachments)
+        controller.sendMessage(
+            text,
+            attachments: selectedAttachments
+        )
     }
 }
 
@@ -266,45 +344,57 @@ struct TaskStatusCard: View {
     @ObservedObject var controller: AppController
 
     private var showsDesktopActivity: Bool { controller.isDesktopActivityStatus }
-    private var desktopState: CodexTaskState? { model.desktopActivity?.state }
-    private var isWorking: Bool {
-        showsDesktopActivity ? desktopState?.isInProgress == true : model.isGenerating
+    private var desktopTasks: [CodexTaskActivity] {
+        Array(model.desktopActivities.prefix(PinChatVisualMetrics.maximumVisibleDesktopTasks))
     }
-    private var isFailed: Bool {
-        showsDesktopActivity ? desktopState == .stopped : model.lastTurnError != nil
-    }
+    private var isFailed: Bool { model.lastTurnError != nil }
     private var isComplete: Bool {
-        showsDesktopActivity
-            ? desktopState == .completed
-            : !model.isGenerating && !model.latestAssistantText.isEmpty && !isFailed
+        !model.isGenerating && !model.latestAssistantText.isEmpty && !isFailed
     }
 
     var body: some View {
+        Group {
+            if showsDesktopActivity {
+                desktopTaskList
+            } else {
+                conversationStatus
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .frame(
+            height: showsDesktopActivity
+                ? PinChatVisualMetrics.desktopStatusContentHeight(taskCount: desktopTasks.count)
+                : PinChatVisualMetrics.statusContentHeight
+        )
+        .compactFloatingSurface(cornerRadius: 18)
+        .padding(PinChatVisualMetrics.compactSurfaceOuterInset)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onHover(perform: controller.statusHoverChanged)
+        .onChange(of: model.desktopActivities.count) {
+            controller.refreshDesktopActivityPanelLayout()
+        }
+        .animation(
+            .spring(response: 0.34, dampingFraction: 0.82),
+            value: model.desktopActivities
+        )
+    }
+
+    private var conversationStatus: some View {
         HStack(spacing: 8) {
-            statusGlyph
+            conversationStatusGlyph
 
             VStack(alignment: .leading, spacing: 3) {
-                Text(title)
+                Text(conversationTitle)
                     .font(.system(size: 14.5, weight: .semibold))
                     .lineLimit(1)
-                Text(detail)
+                Text(conversationDetail)
                     .font(.system(size: 12.5))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            if showsDesktopActivity {
-                if model.desktopActivity != nil {
-                    ActionCircleButton(
-                        systemName: "arrow.up.right",
-                        tint: .primary.opacity(0.075),
-                        foreground: .secondary,
-                        help: "在 Codex 中打开",
-                        action: controller.openDesktopActivityInCodex
-                    )
-                }
-            } else if model.isGenerating {
+            if model.isGenerating {
                 ActionCircleButton(
                     systemName: "stop.fill",
                     tint: .primary.opacity(0.075),
@@ -353,20 +443,11 @@ struct TaskStatusCard: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 11)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(
-            Color(nsColor: .windowBackgroundColor),
-            in: RoundedRectangle(cornerRadius: 18, style: .continuous)
-        )
-        .padding(PinChatVisualMetrics.compactSurfaceOuterInset)
-        .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
-        .onHover(perform: controller.statusHoverChanged)
-        .animation(.spring(response: 0.34, dampingFraction: 0.82), value: isWorking)
     }
 
     @ViewBuilder
-    private var statusGlyph: some View {
-        if isWorking {
+    private var conversationStatusGlyph: some View {
+        if model.isGenerating {
             ProgressView()
                 .controlSize(.small)
                 .frame(width: 24, height: 24)
@@ -388,25 +469,117 @@ struct TaskStatusCard: View {
         }
     }
 
-    private var title: String {
-        if showsDesktopActivity {
-            switch desktopState {
-            case .thinking: return "正在思考"
-            case .waiting: return "等待你的操作"
-            case .completed: return "已完成"
-            case .stopped: return "已停止"
-            case .none: return "Codex 已就绪"
+    private var desktopTaskList: some View {
+        VStack(spacing: 0) {
+            if desktopTasks.isEmpty {
+                HStack(spacing: 9) {
+                    Image(systemName: "sparkles")
+                        .foregroundStyle(Color.accentColor)
+                        .frame(width: 24)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Codex 已就绪")
+                            .font(.system(size: 14, weight: .semibold))
+                        Text("在 Codex 中开始任务后会显示在这里")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                }
+                .padding(.horizontal, 12)
+                .frame(height: PinChatVisualMetrics.desktopTaskRowHeight)
+            } else {
+                ForEach(Array(desktopTasks.enumerated()), id: \.element.id) { index, task in
+                    desktopTaskRow(task)
+                    if index < desktopTasks.count - 1 {
+                        Divider().padding(.leading, 46)
+                    }
+                }
             }
         }
+        .padding(.vertical, 5)
+    }
+
+    private func desktopTaskRow(_ task: CodexTaskActivity) -> some View {
+        HStack(spacing: 9) {
+            desktopStatusGlyph(task.state)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(task.title)
+                    .font(.system(size: 13.5, weight: .semibold))
+                    .lineLimit(1)
+                Text(desktopStateLabel(task.state))
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(desktopStateColor(task.state))
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            ActionCircleButton(
+                systemName: "arrow.up.right",
+                tint: .primary.opacity(0.075),
+                foreground: .secondary,
+                help: "在 Codex 中打开 \(task.title)",
+                size: 26
+            ) {
+                controller.openDesktopActivityInCodex(task.threadID)
+            }
+        }
+        .padding(.horizontal, 11)
+        .frame(height: PinChatVisualMetrics.desktopTaskRowHeight)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(task.title)，\(desktopStateLabel(task.state))")
+    }
+
+    @ViewBuilder
+    private func desktopStatusGlyph(_ state: CodexTaskState) -> some View {
+        if state == .thinking {
+            ProgressView()
+                .controlSize(.small)
+                .frame(width: 24, height: 24)
+        } else {
+            Image(systemName: desktopStateSymbol(state))
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(desktopStateColor(state))
+                .frame(width: 24, height: 24)
+                .background(desktopStateColor(state).opacity(0.12), in: Circle())
+        }
+    }
+
+    private func desktopStateLabel(_ state: CodexTaskState) -> String {
+        switch state {
+        case .thinking: return "正在思考"
+        case .waiting: return "等待你的操作"
+        case .completed: return "已完成"
+        case .stopped: return "已停止"
+        case .failed: return "失败"
+        }
+    }
+
+    private func desktopStateSymbol(_ state: CodexTaskState) -> String {
+        switch state {
+        case .thinking: return "sparkles"
+        case .waiting: return "hand.raised.fill"
+        case .completed: return "checkmark"
+        case .stopped: return "stop.fill"
+        case .failed: return "exclamationmark"
+        }
+    }
+
+    private func desktopStateColor(_ state: CodexTaskState) -> Color {
+        switch state {
+        case .thinking: return .accentColor
+        case .waiting: return .orange
+        case .completed: return .green
+        case .stopped: return .secondary
+        case .failed: return .red
+        }
+    }
+
+    private var conversationTitle: String {
         if model.isGenerating { return "正在处理" }
         if isFailed { return "未能完成" }
         return model.selectedSession?.title ?? "已完成"
     }
 
-    private var detail: String {
-        if showsDesktopActivity {
-            return model.desktopActivity?.title ?? "在 Codex 中开始任务后会显示在这里"
-        }
+    private var conversationDetail: String {
         if let error = model.lastTurnError { return error }
         if model.isGenerating {
             return model.latestUserText.isEmpty ? "Codex 正在思考…" : model.latestUserText
@@ -586,6 +759,16 @@ private struct MessageBubble: View {
                                 Label(
                                     attachment.displayName,
                                     systemImage: attachment.kind == .image ? "photo" : "doc"
+                                )
+                                .font(.system(size: 11.5, weight: .medium))
+                                .lineLimit(1)
+                            }
+                        }
+                        if let capabilities = message.capabilities, !capabilities.isEmpty {
+                            ForEach(capabilities) { capability in
+                                Label(
+                                    capability.name,
+                                    systemImage: capability.kind == .skill ? "sparkles" : "app"
                                 )
                                 .font(.system(size: 11.5, weight: .medium))
                                 .lineLimit(1)
