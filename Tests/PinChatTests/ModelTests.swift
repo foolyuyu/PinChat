@@ -23,6 +23,53 @@ import Testing
     #expect(loaded.messages.map(\.text) == ["你好"])
 }
 
+@Test func sessionStorePersistsOptionalAttachmentsWithoutBreakingMessages() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("PinChatAttachmentTests-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let store = SessionStore(baseDirectory: directory)
+    let attachment = ChatAttachment(url: URL(fileURLWithPath: "/tmp/reference.png"))
+    let message = ChatMessage(role: .user, text: "查看附件", attachments: [attachment])
+    try store.save([ChatSession(messages: [message])])
+
+    let loaded = try #require(store.load().first?.messages.first)
+    #expect(loaded.attachments == [attachment])
+
+    let legacyJSON = """
+    [{"id":"00000000-0000-0000-0000-000000000001","title":"旧会话","createdAt":"2026-09-15T00:00:00Z","updatedAt":"2026-09-15T00:00:00Z","messages":[{"id":"00000000-0000-0000-0000-000000000002","role":"user","text":"旧消息","createdAt":"2026-09-15T00:00:00Z"}]}]
+    """
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    let legacy = try decoder.decode([ChatSession].self, from: Data(legacyJSON.utf8))
+    #expect(legacy.first?.messages.first?.attachments == nil)
+}
+
+@Test func codexTurnInputMapsImagesAndFiles() throws {
+    let image = ChatAttachment(url: URL(fileURLWithPath: "/tmp/design.png"))
+    let file = ChatAttachment(url: URL(fileURLWithPath: "/tmp/notes.txt"))
+    let items = CodexAppServer.turnInputItems(
+        text: "解释附件",
+        attachments: [image, file]
+    )
+
+    #expect(items.count == 2)
+    let prompt = try #require(items[0]["text"] as? String)
+    #expect(prompt.contains("解释附件"))
+    #expect(prompt.contains("/tmp/notes.txt"))
+    #expect(items[1]["type"] as? String == "localImage")
+    #expect(items[1]["path"] as? String == "/tmp/design.png")
+}
+
+@Test func codexTurnInputAllowsImageOnlySubmission() throws {
+    let image = ChatAttachment(url: URL(fileURLWithPath: "/tmp/screenshot.jpeg"))
+    let items = CodexAppServer.turnInputItems(text: "", attachments: [image])
+
+    #expect(items.count == 2)
+    #expect(items[0]["text"] as? String == "请查看所附图片。")
+    #expect(items[1]["type"] as? String == "localImage")
+}
+
 @Test func planNamesAreReadable() {
     #expect(ChatAccount(email: nil, plan: "plus").displayPlan == "Plus")
     #expect(ChatAccount(email: nil, plan: "business").displayPlan == "Business")
@@ -150,6 +197,8 @@ import Testing
     #expect(PinChatVisualMetrics.composerSize == NSSize(width: 360, height: 50))
     #expect(PinChatVisualMetrics.statusSize == NSSize(width: 410, height: 66))
     #expect(PinChatVisualMetrics.attachmentGap == 3)
+    #expect(PinChatVisualMetrics.composerAttachmentSize == NSSize(width: 360, height: 88))
+    #expect(PinChatVisualMetrics.compactSurfaceOuterInset == 0)
 }
 
 @Test func floatingButtonSnapsToNearestScreenEdge() {

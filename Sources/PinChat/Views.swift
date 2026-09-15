@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct PetRootView: View {
     @ObservedObject var model: AppModel
@@ -42,73 +43,170 @@ struct MiniComposerView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var controller: AppController
     @State private var draft = ""
+    @State private var attachments: [ChatAttachment] = []
+    @State private var showsAttachmentMenu = false
     @FocusState private var focused: Bool
 
     var body: some View {
-        HStack(spacing: 8) {
-            Circle()
-                .fill(Color.primary.opacity(0.055))
-                .frame(
-                    width: PinChatVisualMetrics.composerActionSize,
-                    height: PinChatVisualMetrics.composerActionSize
-                )
-                .overlay {
-                    Image(systemName: model.account == nil ? "person.crop.circle" : "plus")
-                        .font(.system(size: 13, weight: .regular))
-                        .foregroundStyle(.primary)
-                }
-                .onTapGesture {
-                    if model.account == nil { model.signIn() }
-                }
-                .help(model.account == nil ? "登录 ChatGPT" : "附件将在后续版本提供")
-
-            TextField(placeholder, text: $draft, axis: .vertical)
-                .textFieldStyle(.plain)
-                .font(.system(size: 15, weight: .regular))
-                .lineLimit(1...2)
-                .focused($focused)
-                .disabled(!model.canSend || model.isGenerating)
-                .onSubmit(send)
-
-            if model.account == nil {
-                Button("登录") { model.signIn() }
-                    .buttonStyle(.borderedProminent)
-                    .buttonBorderShape(.capsule)
-            } else if model.isGenerating {
-                ActionCircleButton(
-                    systemName: "stop.fill",
-                    tint: .primary.opacity(0.10),
-                    foreground: .primary,
-                    help: "停止生成",
-                    size: PinChatVisualMetrics.composerActionSize,
-                    action: model.stopGenerating
-                )
-            } else {
-                ActionCircleButton(
-                    systemName: "arrow.up",
-                    tint: Color(red: 0.59, green: 0.74, blue: 1.0),
-                    foreground: .white,
-                    help: "发送",
-                    size: PinChatVisualMetrics.composerActionSize,
-                    action: send
-                )
-                .disabled(!model.canSend || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                .opacity(!model.canSend || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.62 : 1)
+        VStack(spacing: 0) {
+            if !attachments.isEmpty {
+                attachmentStrip
             }
+
+            HStack(spacing: 8) {
+                attachmentMenu
+
+                TextField(placeholder, text: $draft, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 15, weight: .regular))
+                    .lineLimit(1...2)
+                    .focused($focused)
+                    .disabled(!model.canSend || model.isGenerating)
+                    .onSubmit(send)
+
+                if model.account == nil {
+                    Button("登录") { model.signIn() }
+                        .buttonStyle(.borderedProminent)
+                        .buttonBorderShape(.capsule)
+                } else if model.isGenerating {
+                    ActionCircleButton(
+                        systemName: "stop.fill",
+                        tint: .primary.opacity(0.10),
+                        foreground: .primary,
+                        help: "停止生成",
+                        size: PinChatVisualMetrics.composerActionSize,
+                        action: model.stopGenerating
+                    )
+                } else {
+                    ActionCircleButton(
+                        systemName: "arrow.up",
+                        tint: Color(red: 0.59, green: 0.74, blue: 1.0),
+                        foreground: .white,
+                        help: "发送",
+                        size: PinChatVisualMetrics.composerActionSize,
+                        action: send
+                    )
+                    .disabled(!canSubmit)
+                    .opacity(canSubmit ? 1 : 0.62)
+                }
+            }
+            .padding(.horizontal, 8)
+            .frame(height: PinChatVisualMetrics.composerSize.height)
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        .background(.thinMaterial, in: Capsule())
-        .overlay {
-            Capsule().strokeBorder(Color.primary.opacity(0.09), lineWidth: 0.75)
-        }
-        .shadow(color: .black.opacity(0.14), radius: 10, y: 4)
-        .padding(4)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(
+            Color(nsColor: .windowBackgroundColor),
+            in: RoundedRectangle(cornerRadius: 25, style: .continuous)
+        )
+        .padding(PinChatVisualMetrics.compactSurfaceOuterInset)
+        .shadow(color: .black.opacity(0.13), radius: 8, y: 3)
         .onAppear { focusSoon() }
         .onChange(of: controller.isComposerVisible) {
             if controller.isComposerVisible { focusSoon() }
         }
+        .onChange(of: attachments.isEmpty) {
+            controller.setComposerHasAttachments(!attachments.isEmpty)
+        }
         .onExitCommand { controller.hideComposer() }
+    }
+
+    @ViewBuilder
+    private var attachmentMenu: some View {
+        if model.account == nil {
+            Button(action: model.signIn) {
+                composerLeadingIcon(systemName: "person.crop.circle")
+            }
+            .buttonStyle(.plain)
+            .help("登录 ChatGPT")
+        } else {
+            Button {
+                showsAttachmentMenu.toggle()
+            } label: {
+                composerLeadingIcon(systemName: "plus")
+            }
+            .buttonStyle(.plain)
+            .help("添加附件")
+            .accessibilityLabel("添加附件")
+            .popover(isPresented: $showsAttachmentMenu, arrowEdge: .bottom) {
+                VStack(spacing: 2) {
+                    attachmentAction("添加文件和文件夹…", systemName: "doc.badge.plus") {
+                        showsAttachmentMenu = false
+                        chooseAttachments(photosOnly: false)
+                    }
+                    attachmentAction("添加照片…", systemName: "photo.on.rectangle") {
+                        showsAttachmentMenu = false
+                        chooseAttachments(photosOnly: true)
+                    }
+                    Divider().padding(.vertical, 3)
+                    attachmentAction("截屏…", systemName: "camera.viewfinder") {
+                        showsAttachmentMenu = false
+                        controller.captureInteractiveScreenshot { url in
+                            if let url { addAttachments([url]) }
+                        }
+                    }
+                }
+                .padding(6)
+                .frame(width: 226)
+            }
+        }
+    }
+
+    private func attachmentAction(
+        _ title: String,
+        systemName: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: systemName)
+                .font(.system(size: 13))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 9)
+                .frame(height: 31)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func composerLeadingIcon(systemName: String) -> some View {
+        Image(systemName: systemName)
+            .font(.system(size: 13, weight: .regular))
+            .foregroundStyle(.primary)
+            .frame(
+                width: PinChatVisualMetrics.composerActionSize,
+                height: PinChatVisualMetrics.composerActionSize
+            )
+            .background(Color.primary.opacity(0.055), in: Circle())
+    }
+
+    private var attachmentStrip: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 6) {
+                ForEach(attachments) { attachment in
+                    HStack(spacing: 5) {
+                        Image(systemName: attachment.kind == .image ? "photo" : "doc")
+                            .font(.system(size: 11, weight: .medium))
+                        Text(attachment.displayName)
+                            .font(.system(size: 11.5, weight: .medium))
+                            .lineLimit(1)
+                        Button {
+                            attachments.removeAll { $0.id == attachment.id }
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 9, weight: .bold))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("移除 \(attachment.displayName)")
+                    }
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 8)
+                    .frame(height: 26)
+                    .background(Color.primary.opacity(0.055), in: Capsule())
+                }
+            }
+            .padding(.horizontal, 10)
+        }
+        .scrollIndicators(.hidden)
+        .frame(height: 38)
     }
 
     private var placeholder: String {
@@ -124,11 +222,42 @@ struct MiniComposerView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { focused = true }
     }
 
+    private var canSubmit: Bool {
+        model.canSend && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty)
+    }
+
+    private func chooseAttachments(photosOnly: Bool) {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = !photosOnly
+        panel.resolvesAliases = true
+        panel.prompt = "添加"
+        panel.message = photosOnly ? "选择要发送给 Codex 的照片" : "选择要提供给 Codex 的文件或文件夹"
+        if photosOnly {
+            panel.allowedContentTypes = [.image]
+        }
+        panel.begin { response in
+            guard response == .OK else { return }
+            addAttachments(panel.urls)
+        }
+    }
+
+    private func addAttachments(_ urls: [URL]) {
+        let knownPaths = Set(attachments.map(\.path))
+        let additions = urls
+            .map { ChatAttachment(url: $0) }
+            .filter { !knownPaths.contains($0.path) }
+        attachments.append(contentsOf: additions)
+    }
+
     private func send() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, model.canSend, !model.isGenerating else { return }
+        guard canSubmit, !model.isGenerating else { return }
+        let selectedAttachments = attachments
         draft = ""
-        controller.sendMessage(text)
+        attachments = []
+        controller.sendMessage(text, attachments: selectedAttachments)
     }
 }
 
@@ -224,13 +353,13 @@ struct TaskStatusCard: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 11)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.75)
-        }
-        .shadow(color: .black.opacity(0.12), radius: 9, y: 4)
-        .padding(4)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(
+            Color(nsColor: .windowBackgroundColor),
+            in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+        )
+        .padding(PinChatVisualMetrics.compactSurfaceOuterInset)
+        .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
         .onHover(perform: controller.statusHoverChanged)
         .animation(.spring(response: 0.34, dampingFraction: 0.82), value: isWorking)
     }
@@ -451,17 +580,29 @@ private struct MessageBubble: View {
             if message.role == .user {
                 HStack(alignment: .top) {
                     Spacer(minLength: 44)
-                    Text(message.text)
-                        .font(.system(size: 14.5))
-                        .lineSpacing(4)
-                        .textSelection(.enabled)
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 13)
-                        .padding(.vertical, 10)
-                        .background(
-                            Color(nsColor: .controlAccentColor),
-                            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        )
+                    VStack(alignment: .leading, spacing: 7) {
+                        if let attachments = message.attachments, !attachments.isEmpty {
+                            ForEach(attachments) { attachment in
+                                Label(
+                                    attachment.displayName,
+                                    systemImage: attachment.kind == .image ? "photo" : "doc"
+                                )
+                                .font(.system(size: 11.5, weight: .medium))
+                                .lineLimit(1)
+                            }
+                        }
+                        Text(message.text)
+                            .font(.system(size: 14.5))
+                            .lineSpacing(4)
+                            .textSelection(.enabled)
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 13)
+                    .padding(.vertical, 10)
+                    .background(
+                        Color(nsColor: .controlAccentColor),
+                        in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    )
                 }
             } else if message.text.isEmpty {
                 HStack(spacing: 7) {

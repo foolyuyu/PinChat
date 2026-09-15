@@ -263,9 +263,9 @@ final class AppModel: ObservableObject {
         persist()
     }
 
-    func send(_ rawText: String) {
+    func send(_ rawText: String, attachments: [ChatAttachment] = []) {
         let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !isGenerating else { return }
+        guard !text.isEmpty || !attachments.isEmpty, !isGenerating else { return }
         guard canSend else {
             if connectionStatus == .starting {
                 alertMessage = "正在重新连接本机 Codex，请稍后再发送。"
@@ -279,12 +279,20 @@ final class AppModel: ObservableObject {
 
         let sessionID = selectedSessionID ?? newConversation()
         guard let index = sessions.firstIndex(where: { $0.id == sessionID }) else { return }
-        let userMessage = ChatMessage(role: .user, text: text)
+        let visibleText = text.isEmpty ? "查看附件" : text
+        let userMessage = ChatMessage(
+            role: .user,
+            text: visibleText,
+            attachments: attachments.isEmpty ? nil : attachments
+        )
         let assistantMessage = ChatMessage(role: .assistant, text: "")
         sessions[index].messages.append(contentsOf: [userMessage, assistantMessage])
         sessions[index].updatedAt = Date()
         if sessions[index].messages.filter({ $0.role == .user }).count == 1 {
-            sessions[index].title = Self.makeTitle(from: text)
+            let titleSource = text.isEmpty
+                ? "附件：\(attachments.first?.displayName ?? "新对话")"
+                : text
+            sessions[index].title = Self.makeTitle(from: titleSource)
         }
 
         let existingThreadID = sessions[index].codexThreadID
@@ -296,6 +304,7 @@ final class AppModel: ObservableObject {
 
         chatService.sendMessage(
             text: text,
+            attachments: attachments,
             existingThreadID: existingThreadID,
             onThreadReady: { [weak self] threadID in
                 Task { @MainActor in self?.attach(threadID: threadID, to: sessionID) }

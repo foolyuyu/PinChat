@@ -125,7 +125,7 @@ final class CodexAppServer: @unchecked Sendable {
                             "title": purpose == .conversation
                                 ? "PinChat"
                                 : "PinChat Activity Observer",
-                            "version": "0.2.3"
+                            "version": "0.2.4"
                         ]
                     ]
                 ) { result in
@@ -314,6 +314,7 @@ final class CodexAppServer: @unchecked Sendable {
 
     func sendMessage(
         text: String,
+        attachments: [ChatAttachment] = [],
         existingThreadID: String?,
         onThreadReady: @escaping @Sendable (String) -> Void,
         onTurnStarted: @escaping @Sendable (ActiveTurn) -> Void,
@@ -330,7 +331,7 @@ final class CodexAppServer: @unchecked Sendable {
                     method: "turn/start",
                     params: [
                         "threadId": threadID,
-                        "input": [["type": "text", "text": text]],
+                        "input": Self.turnInputItems(text: text, attachments: attachments),
                         "turnTrigger": "user"
                     ]
                 ) { response in
@@ -351,6 +352,29 @@ final class CodexAppServer: @unchecked Sendable {
                 }
             }
         }
+    }
+
+    static func turnInputItems(text: String, attachments: [ChatAttachment]) -> [JSON] {
+        let fileAttachments = attachments.filter { $0.kind == .file }
+        let imageAttachments = attachments.filter { $0.kind == .image }
+        var prompt = text.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if !fileAttachments.isEmpty {
+            let paths = fileAttachments.map { "- \($0.path)" }.joined(separator: "\n")
+            let context = "已附加以下由用户选择的本机文件或文件夹，请按需读取：\n\(paths)"
+            prompt = prompt.isEmpty ? context : "\(prompt)\n\n\(context)"
+        } else if prompt.isEmpty, !imageAttachments.isEmpty {
+            prompt = "请查看所附图片。"
+        }
+
+        var items: [JSON] = []
+        if !prompt.isEmpty {
+            items.append(["type": "text", "text": prompt])
+        }
+        items.append(contentsOf: imageAttachments.map {
+            ["type": "localImage", "path": $0.path]
+        })
+        return items
     }
 
     func interruptActiveTurn(completion: (@Sendable (Result<Void, Error>) -> Void)? = nil) {

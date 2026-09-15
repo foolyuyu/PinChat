@@ -1,8 +1,32 @@
 import Foundation
+import UniformTypeIdentifiers
 
 enum ChatRole: String, Codable, Sendable {
     case user
     case assistant
+}
+
+enum ChatAttachmentKind: String, Codable, Equatable, Sendable {
+    case image
+    case file
+}
+
+struct ChatAttachment: Identifiable, Codable, Hashable, Sendable {
+    var id: UUID
+    var path: String
+    var displayName: String
+    var kind: ChatAttachmentKind
+
+    init(id: UUID = UUID(), url: URL) {
+        self.id = id
+        path = url.standardizedFileURL.path
+        displayName = url.lastPathComponent.isEmpty ? url.path : url.lastPathComponent
+        let resourceType = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType
+        let contentType = resourceType ?? UTType(filenameExtension: url.pathExtension)
+        kind = contentType?.conforms(to: .image) == true ? .image : .file
+    }
+
+    var url: URL { URL(fileURLWithPath: path) }
 }
 
 enum CodexTaskState: String, Equatable, Sendable {
@@ -51,19 +75,22 @@ struct ChatMessage: Identifiable, Codable, Hashable, Sendable {
     var role: ChatRole
     var text: String
     var createdAt: Date
+    var attachments: [ChatAttachment]?
 
     init(
         id: UUID = UUID(),
         sourceID: String? = nil,
         role: ChatRole,
         text: String,
-        createdAt: Date = Date()
+        createdAt: Date = Date(),
+        attachments: [ChatAttachment]? = nil
     ) {
         self.id = id
         self.sourceID = sourceID
         self.role = role
         self.text = text
         self.createdAt = createdAt
+        self.attachments = attachments
     }
 }
 

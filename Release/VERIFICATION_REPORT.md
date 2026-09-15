@@ -1,27 +1,31 @@
-# PinChat 2.3 Codex 无冲突交接版验证报告
+# PinChat 2.4 附件与纯净表面版验证报告
 
 验证日期：2026-09-15（Asia/Shanghai）
 
 ## 交付物
 
-- `PinChat.app`：macOS 14+、Apple Silicon、本机 ad-hoc 签名的可运行应用，版本 0.2.3（5）。
+- `PinChat.app`：macOS 14+、Apple Silicon、本机 ad-hoc 签名的可运行应用，版本 0.2.4（6）。
 - `PinChat-source.zip`：完整 Swift Package / Xcode 工程源码，不含 Git、构建缓存和应用产物。
-- v1.0、v1.1、v2.0、v2.1、v2.2、v2.3 六份只读冻结需求及各自 SHA-256 校验文件。
+- v1.0、v1.1、v2.0、v2.1、v2.2、v2.3、v2.4 七份只读冻结需求及各自 SHA-256 校验文件。
 - v2.1 冻结需求 SHA-256：`6636da523138b5b19b64c4889f063bc7cf687cec387ff4417e924b7e4a8d7427`。
 - v2.2 冻结需求 SHA-256：`2fb38fd3a99e5214582154f2f1ea314def43c6414e6023c50733bc1e47d5d46c`。
 - v2.3 冻结需求 SHA-256：`1165cc5dfd2048c83cf1706dfb2812ae0c58c1700dcbe6d8a8e869e4811bbbe6`。
+- v2.4 冻结需求 SHA-256：`f168c3b480faab81a0ac63dea7e45e5cf294fef82e21951712738f4ebe3ea6a4`。
 
 ## 构建与自动测试
 
-- `swift test`：27 项测试全部通过。
+- `swift test`：30 项测试全部通过。
 - `xcodebuild -scheme PinChat -destination platform=macOS ... build`：通过。
 - Release 构建：通过。
 - `plutil -lint`：通过。
 - `codesign --verify --deep --strict`：通过。
-- v1.0 至 v2.3 全部冻结需求 SHA-256 校验：通过。
+- v1.0 至 v2.4 全部冻结需求 SHA-256 校验：通过。
 
 新增测试覆盖：
 
+- App Server 将照片映射为 `localImage`，将普通文件路径拼入只读本机上下文，并支持仅图片提交。
+- 附件元数据持久化与旧版无附件 `sessions.json` 的向后兼容解码。
+- 带附件输入框的 360×88 pt 动态尺寸，以及紧凑表面 0 pt 外圈透明 inset。
 - 对话通道与桌面活动观察通道的独立角色，以及交接期间只保留观察通道。
 - 交接后的对话通道按需重启状态，并校验 `codex://threads/<thread-id>` 保持原任务 ID。
 - Codex `task_started`、`task_complete`、`turn_aborted` 事件到思考、完成、停止状态的归约。
@@ -63,10 +67,18 @@
 - Release 实机验证：PinChat 启动并连接后具有两个独立子 App Server；真实提问完成并点击 `↗` 后，对话子进程退出，仅保留一个活动观察子进程。
 - 同一个已交接任务随后由 Codex 接受第二轮消息并无错误完成，证明原任务 ID 可继续使用且不存在 PinChat 活跃写入者占用。
 
+## 附件入口与紧凑表面
+
+- 登录状态下 `+` 为真实菜单，包含“添加文件和文件夹…”，“添加照片…”和“截屏…”；未登录时仍作为登录入口。
+- 文件和照片选择使用 macOS 原生选择器并支持多选；截屏使用系统交互式区域/窗口选择，缓存位于 PinChat 的 Caches/Attachments 目录。
+- 图片按官方 App Server `localImage` 输入发送；普通文件和文件夹只发送用户选择的绝对路径，保持只读 sandbox，不复制或修改源文件。
+- 已选附件以横向可移除标签展示，输入框从 360×50 pt 自动扩展为 360×88 pt；允许无文字、仅附件发送。
+- 输入框和状态卡移除了外围 4 pt 透明 padding、灰色细描边和透底材质，圆角实色表面直接贴合无边框窗口。
+
 ## 安全与边界
 
 - PinChat 快速提问继续采用 `approvalPolicy = never` 与 `sandbox = read-only`；工具执行、文件修改和审批交由 Codex 主应用。
 - 仓库和应用包不内嵌官方 WebP 二进制素材；运行时优先读取 Codex 缓存，其次读取 PinChat 缓存或下载官方资源。
 - 本地任务索引与 rollout 仅读取，不写入、不删除、不改变 Codex 设置。
 - 全屏置顶指普通 macOS 全屏 Space，不包括锁屏、登录界面、系统安全窗口或受保护 DRM 画面。
-- 本轮不含语音、附件、其他 AI API、Developer ID 签名、公证或 App Store 上架。
+- 本轮不含语音、其他 AI API、Developer ID 签名、公证或 App Store 上架。

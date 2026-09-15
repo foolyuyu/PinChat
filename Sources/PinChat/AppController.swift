@@ -137,12 +137,14 @@ enum PinChatVisualMetrics {
     static let petSize = NSSize(width: 64, height: 64)
     static let petArtworkSize = NSSize(width: 52, height: 56)
     static let composerSize = NSSize(width: 360, height: 50)
+    static let composerAttachmentSize = NSSize(width: 360, height: 88)
     static let composerActionSize: CGFloat = 30
     static let statusSize = NSSize(width: 410, height: 66)
     static let statusActionSize: CGFloat = 28
     static let answerSize = NSSize(width: 520, height: 420)
     static let answerToolbarActionSize: CGFloat = 24
     static let followUpActionSize: CGFloat = 30
+    static let compactSurfaceOuterInset: CGFloat = 0
     static let attachmentGap: CGFloat = 3
     static let hoverRevealDelay: TimeInterval = 0.32
     static let hoverDismissDelay: TimeInterval = 0.20
@@ -200,6 +202,7 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
     private var petHovered = false
     private var statusHovered = false
     private var panelTransitionInProgress = false
+    private var composerHasAttachments = false
 
     private enum Keys {
         static let alwaysOnTop = "alwaysOnTop"
@@ -332,7 +335,7 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
         }
     }
 
-    func sendMessage(_ text: String) {
+    func sendMessage(_ text: String, attachments: [ChatAttachment] = []) {
         guard model.account != nil else {
             showComposer()
             model.alertMessage = PinChatError.notSignedIn.localizedDescription
@@ -344,9 +347,61 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
         statusContext = .conversation
         composerPanel?.orderOut(nil)
         answerPanel?.orderOut(nil)
-        model.send(text)
+        model.send(text, attachments: attachments)
         positionAttachedPanels()
         if let statusPanel { revealWithLift(statusPanel) }
+    }
+
+    func setComposerHasAttachments(_ hasAttachments: Bool) {
+        guard composerHasAttachments != hasAttachments else { return }
+        composerHasAttachments = hasAttachments
+        if isComposerVisible {
+            positionAttachedPanels(animated: true)
+        }
+    }
+
+    func captureInteractiveScreenshot(
+        completion: @escaping @MainActor @Sendable (URL?) -> Void
+    ) {
+        guard let cacheRoot = FileManager.default.urls(
+            for: .cachesDirectory,
+            in: .userDomainMask
+        ).first else {
+            model.alertMessage = "无法访问 PinChat 截屏缓存。"
+            completion(nil)
+            return
+        }
+        let directory = cacheRoot
+            .appendingPathComponent("PinChat", isDirectory: true)
+            .appendingPathComponent("Attachments", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true
+            )
+        } catch {
+            model.alertMessage = "无法创建截屏缓存：\(error.localizedDescription)"
+            completion(nil)
+            return
+        }
+
+        let output = directory.appendingPathComponent("appshot-\(UUID().uuidString).png")
+        Task { @MainActor in
+            let captured = await Task.detached(priority: .userInitiated) {
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+                process.arguments = ["-i", "-x", output.path]
+                do {
+                    try process.run()
+                    process.waitUntilExit()
+                    return process.terminationStatus == 0
+                        && FileManager.default.fileExists(atPath: output.path)
+                } catch {
+                    return false
+                }
+            }.value
+            completion(captured ? output : nil)
+        }
     }
 
     func showStatus() {
@@ -841,7 +896,11 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
         var sizes: [NSSize] = []
         if isComposerVisible, let composerPanel {
             panels.append(composerPanel)
-            sizes.append(PinChatVisualMetrics.composerSize)
+            sizes.append(
+                composerHasAttachments
+                    ? PinChatVisualMetrics.composerAttachmentSize
+                    : PinChatVisualMetrics.composerSize
+            )
         } else if isStatusVisible, let statusPanel {
             panels.append(statusPanel)
             sizes.append(PinChatVisualMetrics.statusSize)
