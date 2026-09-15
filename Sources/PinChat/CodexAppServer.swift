@@ -21,7 +21,8 @@ final class CodexAppServer: @unchecked Sendable {
 
     var onLoginCompleted: (@Sendable (Result<Void, Error>) -> Void)?
     var onAccountUpdated: (@Sendable () -> Void)?
-    var onAgentDelta: (@Sendable (_ threadID: String, _ delta: String) -> Void)?
+    var onAgentDelta: (@Sendable (_ threadID: String, _ itemID: String, _ delta: String) -> Void)?
+    var onAgentMessageCompleted: (@Sendable (_ threadID: String, _ itemID: String, _ text: String) -> Void)?
     var onTurnCompleted: (@Sendable (_ threadID: String, _ error: String?) -> Void)?
     var onProcessStopped: (@Sendable (_ message: String) -> Void)?
 
@@ -34,6 +35,7 @@ final class CodexAppServer: @unchecked Sendable {
     private var pending: [Int: @Sendable (Result<JSON, Error>) -> Void] = [:]
     private(set) var activeTurn: ActiveTurn?
     private var isInitialized = false
+    private var agentMessagePhases: [String: String] = [:]
 
     deinit {
         stop()
@@ -88,7 +90,7 @@ final class CodexAppServer: @unchecked Sendable {
                         "clientInfo": [
                             "name": "pinchat_macos",
                             "title": "PinChat",
-                            "version": "0.1.0"
+                            "version": "0.2.0"
                         ]
                     ]
                 ) { result in
@@ -208,7 +210,10 @@ final class CodexAppServer: @unchecked Sendable {
                                 ))
                             }
                         case "agentMessage":
-                            if let text = item["text"] as? String, !text.isEmpty {
+                            let phase = item["phase"] as? String
+                            if Self.shouldDisplayAgentMessage(phase: phase),
+                               let text = item["text"] as? String,
+                               !text.isEmpty {
                                 messages.append(RemoteMessage(
                                     sourceID: sourceID,
                                     role: .assistant,
@@ -281,16 +286,27 @@ final class CodexAppServer: @unchecked Sendable {
         }
     }
 
-    func stop() {
-        queue.sync {
-            guard let process else { return }
-            process.terminationHandler = nil
-            if process.isRunning { process.terminate() }
-            self.process = nil
-            input = nil
-            isInitialized = false
-            activeTurn = nil
+    func releaseThreadForExternalClient(
+        threadID: String,
+        completion: @escaping @Sendable () -> Void
+    ) {
+        sendRequest(
+            method: "thread/unsubscribe",
+            params: ["threadId": threadID]
+        ) { [weak self] _ in
+            guard let self else {
+                completion()
+                return
+            }
+            self.queue.async {
+                self.stopOnQueue()
+                completion()
+            }
         }
+    }
+
+    func stop() {
+        queue.sync { stopOnQueue() }
     }
 
     private func prepareThread(
@@ -415,10 +431,33 @@ final class CodexAppServer: @unchecked Sendable {
             }
         case "account/updated":
             onAccountUpdated?()
+        case "item/started":
+            guard let item = params["item"] as? JSON,
+                  (item["type"] as? String) == "agentMessage",
+                  let itemID = item["id"] as? String else { return }
+            if let phase = item["phase"] as? String {
+                agentMessagePhases[itemID] = phase
+            } else {
+                agentMessagePhases.removeValue(forKey: itemID)
+            }
         case "item/agentMessage/delta":
             if let threadID = params["threadId"] as? String,
+               let itemID = params["itemId"] as? String,
+               Self.shouldDisplayAgentMessage(phase: agentMessagePhases[itemID]),
                let delta = params["delta"] as? String {
-                onAgentDelta?(threadID, delta)
+                onAgentDelta?(threadID, itemID, delta)
+            }
+        case "item/completed":
+            guard let threadID = params["threadId"] as? String,
+                  let item = params["item"] as? JSON,
+                  (item["type"] as? String) == "agentMessage",
+                  let itemID = item["id"] as? String else { return }
+            let phase = item["phase"] as? String ?? agentMessagePhases[itemID]
+            agentMessagePhases.removeValue(forKey: itemID)
+            if Self.shouldDisplayAgentMessage(phase: phase),
+               let text = item["text"] as? String,
+               !text.isEmpty {
+                onAgentMessageCompleted?(threadID, itemID, text)
             }
         case "turn/completed":
             guard let threadID = params["threadId"] as? String else { return }
@@ -428,6 +467,7 @@ final class CodexAppServer: @unchecked Sendable {
                 errorText = error["message"] as? String
             }
             activeTurn = nil
+            agentMessagePhases.removeAll()
             onTurnCompleted?(threadID, errorText)
         case "error":
             guard let threadID = params["threadId"] as? String else { return }
@@ -453,8 +493,43 @@ final class CodexAppServer: @unchecked Sendable {
         input = nil
         isInitialized = false
         activeTurn = nil
+        agentMessagePhases.removeAll()
         callbacks.forEach { $0(.failure(PinChatError.server(message))) }
         onProcessStopped?(message)
+    }
+
+    private func stopOnQueue() {
+        guard let process else {
+            input = nil
+            isInitialized = false
+            activeTurn = nil
+            agentMessagePhases.removeAll()
+            return
+        }
+        process.terminationHandler = nil
+        (process.standardOutput as? Pipe)?.fileHandleForReading.readabilityHandler = nil
+        (process.standardError as? Pipe)?.fileHandleForReading.readabilityHandler = nil
+        try? input?.close()
+        if process.isRunning {
+            process.terminate()
+            process.waitUntilExit()
+        }
+        let callbacks = pending.values
+        pending.removeAll()
+        self.process = nil
+        input = nil
+        isInitialized = false
+        activeTurn = nil
+        agentMessagePhases.removeAll()
+        callbacks.forEach { $0(.failure(PinChatError.processStopped)) }
+    }
+
+    static func shouldDisplayAgentMessage(phase: String?) -> Bool {
+        phase?.lowercased() != "commentary"
+    }
+
+    static func authoritativeAgentText(streamedText: String, completedText: String) -> String {
+        completedText
     }
 
     static func findCodexExecutable() -> URL? {

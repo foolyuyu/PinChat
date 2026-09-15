@@ -1,124 +1,358 @@
 import AppKit
 import SwiftUI
 
-struct CompactChatView: View {
+struct PetRootView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var controller: AppController
 
+    private var animation: PetAnimation {
+        PetAnimation.resolve(
+            isDragging: controller.isDraggingPet,
+            isGenerating: model.isGenerating,
+            hasError: model.lastTurnError != nil,
+            hasAnswer: !model.latestAssistantText.isEmpty
+        )
+    }
+
     var body: some View {
-        ChatSurface(model: model, controller: controller, compact: true)
-            .frame(minWidth: 360, minHeight: 440)
-            .background(.regularMaterial)
-            .alert(
-                "PinChat",
-                isPresented: Binding(
-                    get: { model.alertMessage != nil },
-                    set: { if !$0 { model.alertMessage = nil } }
-                ),
-                actions: { Button("好") { model.alertMessage = nil } },
-                message: { Text(model.alertMessage ?? "") }
+        ZStack(alignment: .bottomLeading) {
+            Color.clear
+            PetSpriteView(store: controller.spriteStore, animation: animation)
+                .frame(width: 98, height: 106)
+                .position(x: 77, y: 57)
+                .contentShape(Rectangle())
+                .onTapGesture { controller.toggleComposer() }
+                .gesture(
+                    DragGesture(minimumDistance: 3)
+                        .onChanged { _ in controller.movePet(to: NSEvent.mouseLocation) }
+                        .onEnded { _ in controller.finishPetDrag() }
+                )
+
+            FloatingCircleButton(
+                systemName: "square.and.pencil",
+                help: "开始提问",
+                size: 40,
+                action: controller.toggleComposer
             )
+            .padding(.leading, 3)
+            .padding(.bottom, 3)
+        }
+        .frame(width: 140, height: 144)
+        .accessibilityElement(children: .contain)
     }
 }
 
-private struct ChatSurface: View {
+struct MiniComposerView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var controller: AppController
-    let compact: Bool
-
     @State private var draft = ""
-    @FocusState private var composerFocused: Bool
+    @FocusState private var focused: Bool
 
     var body: some View {
-        VStack(spacing: 0) {
-            CompactToolbar(model: model, controller: controller)
-
-            ConversationBody(model: model)
-
-            Composer(
-                draft: $draft,
-                isFocused: $composerFocused,
-                isGenerating: model.isGenerating,
-                canSend: model.account != nil,
-                send: send,
-                stop: model.stopGenerating
-            )
-            .padding(.horizontal, compact ? 16 : 24)
-            .padding(.bottom, compact ? 16 : 22)
-        }
-        .background(.ultraThinMaterial)
-        .onAppear {
-            if compact {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
-                    composerFocused = true
+        HStack(spacing: 10) {
+            Circle()
+                .fill(Color.primary.opacity(0.055))
+                .frame(width: 40, height: 40)
+                .overlay {
+                    Image(systemName: model.account == nil ? "person.crop.circle" : "plus")
+                        .font(.system(size: 18, weight: .regular))
+                        .foregroundStyle(.primary)
                 }
+                .onTapGesture {
+                    if model.account == nil { model.signIn() }
+                }
+                .help(model.account == nil ? "登录 ChatGPT" : "附件将在后续版本提供")
+
+            TextField(placeholder, text: $draft, axis: .vertical)
+                .textFieldStyle(.plain)
+                .font(.system(size: 17, weight: .regular))
+                .lineLimit(1...2)
+                .focused($focused)
+                .disabled(model.account == nil || model.isGenerating)
+                .onSubmit(send)
+
+            if model.account == nil {
+                Button("登录") { model.signIn() }
+                    .buttonStyle(.borderedProminent)
+                    .buttonBorderShape(.capsule)
+            } else if model.isGenerating {
+                ActionCircleButton(
+                    systemName: "stop.fill",
+                    tint: .primary.opacity(0.10),
+                    foreground: .primary,
+                    help: "停止生成",
+                    action: model.stopGenerating
+                )
+            } else {
+                ActionCircleButton(
+                    systemName: "arrow.up",
+                    tint: Color(red: 0.59, green: 0.74, blue: 1.0),
+                    foreground: .white,
+                    help: "发送",
+                    size: 40,
+                    action: send
+                )
+                .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .opacity(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.62 : 1)
             }
         }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(.regularMaterial, in: Capsule())
+        .overlay {
+            Capsule().strokeBorder(Color.white.opacity(0.58), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.14), radius: 8, y: 3)
+        .padding(4)
+        .onAppear { focusSoon() }
+        .onChange(of: controller.isComposerVisible) {
+            if controller.isComposerVisible { focusSoon() }
+        }
+        .onExitCommand { controller.hideComposer() }
+    }
+
+    private var placeholder: String {
+        switch model.connectionStatus {
+        case .starting: "正在连接本机 Codex…"
+        case .signingIn: "请在浏览器完成登录…"
+        case .unavailable: "连接失败，请在设置中重试"
+        default: model.account == nil ? "登录后开始提问" : "开始新聊天"
+        }
+    }
+
+    private func focusSoon() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { focused = true }
     }
 
     private func send() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
+        guard !text.isEmpty, model.account != nil, !model.isGenerating else { return }
         draft = ""
-        model.send(text)
+        controller.sendMessage(text)
     }
 }
 
-private struct CompactToolbar: View {
+struct TaskStatusCard: View {
     @ObservedObject var model: AppModel
     @ObservedObject var controller: AppController
 
+    private var isFailed: Bool { model.lastTurnError != nil }
+    private var isComplete: Bool {
+        !model.isGenerating && !model.latestAssistantText.isEmpty && !isFailed
+    }
+
     var body: some View {
-        HStack(spacing: 12) {
-            ToolbarIcon(systemName: "minus", help: "收起小窗") {
-                controller.hideCompactWindow()
-            }
-            ToolbarIcon(
-                systemName: controller.alwaysOnTop ? "pin.fill" : "pin",
-                help: controller.alwaysOnTop ? "取消置顶" : "置顶"
-            ) {
-                controller.alwaysOnTop.toggle()
-            }
-            .foregroundStyle(controller.alwaysOnTop ? Color.accentColor : Color.primary)
+        HStack(spacing: 10) {
+            statusGlyph
 
-            Spacer()
-
-            AccountDot(model: model)
-            ToolbarIcon(systemName: "square.and.pencil", help: "新建对话") {
-                model.newConversation()
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.system(size: 16, weight: .semibold))
+                    .lineLimit(1)
+                Text(detail)
+                    .font(.system(size: 14))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
-            ToolbarIcon(systemName: "macwindow.on.rectangle", help: "在 Codex 中打开") {
-                controller.openCurrentConversationInCodex()
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            if model.isGenerating {
+                ActionCircleButton(
+                    systemName: "stop.fill",
+                    tint: .primary.opacity(0.075),
+                    foreground: .secondary,
+                    help: "停止生成",
+                    action: model.stopGenerating
+                )
+            } else if isFailed {
+                ActionCircleButton(
+                    systemName: "square.and.pencil",
+                    tint: .primary.opacity(0.075),
+                    foreground: .primary,
+                    help: "重新提问",
+                    action: controller.showComposer
+                )
+                ActionCircleButton(
+                    systemName: "checkmark",
+                    tint: Color.green.opacity(0.16),
+                    foreground: .green,
+                    help: "关闭",
+                    action: controller.confirmCompleted
+                )
+            } else if isComplete {
+                ActionCircleButton(
+                    systemName: "arrow.up.right",
+                    tint: .primary.opacity(0.075),
+                    foreground: .secondary,
+                    help: "在 Codex 中打开",
+                    action: controller.openCurrentConversationInCodex
+                )
+                ActionCircleButton(
+                    systemName: "checkmark",
+                    tint: Color.green.opacity(0.17),
+                    foreground: .green,
+                    help: "确认完成",
+                    action: controller.confirmCompleted
+                )
+                ActionCircleButton(
+                    systemName: expansionSymbol,
+                    tint: .primary.opacity(0.075),
+                    foreground: .primary,
+                    help: controller.isAnswerVisible ? "折叠回答" : "展开回答",
+                    action: controller.toggleAnswer
+                )
             }
         }
-        .padding(.horizontal, 18)
-        .padding(.top, 12)
-        .padding(.bottom, 10)
-        .background(.ultraThinMaterial)
-        .overlay(alignment: .bottom) {
-            Divider().opacity(0.45)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 23, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 23, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.52), lineWidth: 1)
         }
+        .shadow(color: .black.opacity(0.13), radius: 9, y: 4)
+        .padding(4)
+        .animation(.spring(response: 0.34, dampingFraction: 0.82), value: model.isGenerating)
+    }
+
+    @ViewBuilder
+    private var statusGlyph: some View {
+        if model.isGenerating {
+            ProgressView()
+                .controlSize(.small)
+                .frame(width: 28, height: 28)
+        } else if isFailed {
+            Image(systemName: "exclamationmark")
+                .font(.system(size: 16, weight: .bold))
+                .foregroundStyle(.red)
+                .frame(width: 28, height: 28)
+                .background(Color.red.opacity(0.12), in: Circle())
+        } else {
+            Image(systemName: "sparkles")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 28, height: 28)
+                .background(Color.accentColor.opacity(0.11), in: Circle())
+        }
+    }
+
+    private var title: String {
+        if model.isGenerating { return "正在处理" }
+        if isFailed { return "未能完成" }
+        return model.selectedSession?.title ?? "已完成"
+    }
+
+    private var detail: String {
+        if let error = model.lastTurnError { return error }
+        if model.isGenerating {
+            return model.latestUserText.isEmpty ? "Codex 正在思考…" : model.latestUserText
+        }
+        return model.latestAssistantText.isEmpty ? "等待回答…" : model.latestAssistantText
+    }
+
+    private var expansionSymbol: String {
+        if controller.isAnswerVisible {
+            return controller.expansionDirection == .below ? "chevron.up" : "chevron.down"
+        }
+        return controller.expansionDirection == .below ? "chevron.down" : "chevron.up"
     }
 }
 
-private struct AccountDot: View {
+struct AnswerPanelView: View {
     @ObservedObject var model: AppModel
+    @ObservedObject var controller: AppController
+    @State private var draft = ""
+    @FocusState private var focused: Bool
 
     var body: some View {
-        Group {
-            if let account = model.account {
-                Text(account.displayPlan)
-                    .font(.caption2.weight(.semibold))
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 4)
-                    .background(Color.green.opacity(0.14), in: Capsule())
-                    .foregroundStyle(.green)
-                    .help(account.email ?? "已登录 ChatGPT")
-            } else if model.connectionStatus == .starting {
-                ProgressView()
-                    .controlSize(.small)
+        VStack(spacing: 0) {
+            answerToolbar
+            Divider().opacity(0.45)
+            ConversationBody(model: model)
+            Divider().opacity(0.40)
+            followUpComposer
+        }
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.10), lineWidth: 1)
+        }
+        .ignoresSafeArea(.container, edges: .top)
+        .onChange(of: controller.isAnswerVisible) {
+            if controller.isAnswerVisible {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { focused = true }
             }
         }
+    }
+
+    private var answerToolbar: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "sparkles")
+                .foregroundStyle(Color.accentColor)
+            Text(model.selectedSession?.title ?? "Codex 回答")
+                .font(.system(size: 14, weight: .semibold))
+                .lineLimit(1)
+            Text(controller.answerDetached ? "自由窗口" : "已吸附")
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+                .background(Color.primary.opacity(0.055), in: Capsule())
+            Spacer()
+            ToolbarIcon(systemName: "arrow.up.right", help: "在 Codex 中打开") {
+                controller.openCurrentConversationInCodex()
+            }
+            ToolbarIcon(systemName: "xmark", help: "关闭回答") {
+                controller.closeAnswer()
+            }
+        }
+        .padding(.horizontal, 17)
+        .padding(.top, 10)
+        .padding(.bottom, 9)
+        .contentShape(Rectangle())
+    }
+
+    private var followUpComposer: some View {
+        HStack(spacing: 10) {
+            TextField("继续提问…", text: $draft, axis: .vertical)
+                .textFieldStyle(.plain)
+                .font(.system(size: 14.5))
+                .lineLimit(1...4)
+                .focused($focused)
+                .disabled(model.isGenerating)
+                .onSubmit(send)
+            if model.isGenerating {
+                ActionCircleButton(
+                    systemName: "stop.fill",
+                    tint: .primary.opacity(0.09),
+                    foreground: .primary,
+                    help: "停止生成",
+                    size: 34,
+                    action: model.stopGenerating
+                )
+            } else {
+                ActionCircleButton(
+                    systemName: "arrow.up",
+                    tint: Color.accentColor,
+                    foreground: .white,
+                    help: "发送追问",
+                    size: 34,
+                    action: send
+                )
+                .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 13)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.40))
+    }
+
+    private func send() {
+        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, !model.isGenerating else { return }
+        draft = ""
+        controller.sendMessage(text)
     }
 }
 
@@ -133,13 +367,10 @@ private struct ConversationBody: View {
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    if model.account == nil {
-                        LoginPrompt(model: model)
-                    } else if let session = model.selectedSession, !session.messages.isEmpty {
+                LazyVStack(alignment: .leading, spacing: 20) {
+                    if let session = model.selectedSession, !session.messages.isEmpty {
                         ForEach(session.messages) { message in
-                            MessageBubble(message: message)
-                                .id(message.id)
+                            MessageBubble(message: message).id(message.id)
                         }
                     } else {
                         EmptyConversation()
@@ -147,7 +378,7 @@ private struct ConversationBody: View {
                     Color.clear.frame(height: 1).id("bottom")
                 }
                 .padding(.horizontal, 22)
-                .padding(.top, 22)
+                .padding(.top, 20)
                 .padding(.bottom, 18)
             }
             .onChange(of: scrollToken) {
@@ -159,57 +390,16 @@ private struct ConversationBody: View {
     }
 }
 
-private struct LoginPrompt: View {
-    @ObservedObject var model: AppModel
-
-    var body: some View {
-        VStack(spacing: 14) {
-            Spacer(minLength: 50)
-            Image(systemName: "person.crop.circle.badge.checkmark")
-                .font(.system(size: 34, weight: .light))
-                .foregroundStyle(.secondary)
-            Text("使用你的 ChatGPT 账号")
-                .font(.headline)
-            Text("通过官方登录使用 Free、Plus 或 Pro 计划额度，无需 API Key。")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 300)
-
-            switch model.connectionStatus {
-            case .starting:
-                ProgressView("正在连接…")
-            case .signingIn:
-                ProgressView("等待浏览器登录完成…")
-                Button("重新打开登录页面") { model.signIn() }
-                    .buttonStyle(.link)
-            case .unavailable:
-                Button("重新连接") { model.retryConnection() }
-                    .buttonStyle(.borderedProminent)
-                Text(model.connectionStatus.label)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-            default:
-                Button("使用 ChatGPT 登录") { model.signIn() }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-            }
-            Spacer(minLength: 20)
-        }
-        .frame(maxWidth: .infinity)
-    }
-}
-
 private struct EmptyConversation: View {
     var body: some View {
         VStack(spacing: 10) {
-            Spacer(minLength: 80)
+            Spacer(minLength: 70)
             Image(systemName: "sparkles")
-                .font(.system(size: 30, weight: .light))
+                .font(.system(size: 28, weight: .light))
                 .foregroundStyle(.secondary)
             Text("有什么可以帮你？")
                 .font(.title3.weight(.semibold))
-            Text("直接输入问题，回答会在这里流式显示。")
+            Text("回答将在这里以 Codex 风格排版显示。")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             Spacer(minLength: 20)
@@ -230,88 +420,71 @@ private struct MessageBubble: View {
                         .font(.system(size: 14.5))
                         .lineSpacing(4)
                         .textSelection(.enabled)
+                        .foregroundStyle(.white)
                         .padding(.horizontal, 13)
                         .padding(.vertical, 10)
                         .background(
-                            Color.primary.opacity(0.065),
+                            Color(nsColor: .controlAccentColor),
                             in: RoundedRectangle(cornerRadius: 12, style: .continuous)
                         )
                 }
-            } else {
-                if message.text.isEmpty {
-                    HStack(spacing: 5) {
-                        ProgressView().controlSize(.small)
-                        Text("正在思考…")
-                            .font(.system(size: 13.5))
-                            .foregroundStyle(.secondary)
-                    }
-                } else {
-                    MarkdownContentView(source: message.text)
+            } else if message.text.isEmpty {
+                HStack(spacing: 7) {
+                    ProgressView().controlSize(.small)
+                    Text("Codex 正在思考…")
+                        .font(.system(size: 13.5))
+                        .foregroundStyle(.secondary)
                 }
+            } else {
+                MarkdownContentView(source: message.text)
             }
         }
         .frame(maxWidth: .infinity)
     }
 }
 
-private struct Composer: View {
-    @Binding var draft: String
-    let isFocused: FocusState<Bool>.Binding
-    let isGenerating: Bool
-    let canSend: Bool
-    let send: () -> Void
-    let stop: () -> Void
+private struct FloatingCircleButton: View {
+    let systemName: String
+    let help: String
+    var size: CGFloat = 46
+    let action: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            TextField(
-                canSend ? "询问任何问题…" : "登录后开始对话",
-                text: $draft,
-                axis: .vertical
-            )
-            .textFieldStyle(.plain)
-            .lineLimit(1...5)
-            .focused(isFocused)
-            .disabled(!canSend || isGenerating)
-            .onSubmit(send)
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: size * 0.43, weight: .medium))
+                .foregroundStyle(.primary)
+                .frame(width: size, height: size)
+                .background(.regularMaterial, in: Circle())
+                .overlay { Circle().strokeBorder(Color.white.opacity(0.60), lineWidth: 1) }
+                .shadow(color: .black.opacity(0.16), radius: 8, y: 3)
+        }
+        .buttonStyle(.plain)
+        .help(help)
+        .accessibilityLabel(help)
+    }
+}
 
-            HStack {
-                Label("本机 Codex", systemImage: "sparkles")
-                    .font(.system(size: 12.5, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .help("使用 Codex 当前模型、人格和推理设置")
-                Spacer()
-                if isGenerating {
-                    Button(action: stop) {
-                        Image(systemName: "stop.fill")
-                            .frame(width: 28, height: 28)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .buttonBorderShape(.circle)
-                    .help("停止生成")
-                } else {
-                    Button(action: send) {
-                        Image(systemName: "arrow.up")
-                            .frame(width: 28, height: 28)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .buttonBorderShape(.circle)
-                    .disabled(!canSend || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    .help("发送")
-                }
-            }
+private struct ActionCircleButton: View {
+    let systemName: String
+    let tint: Color
+    let foreground: Color
+    let help: String
+    var size: CGFloat = 40
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: size * 0.40, weight: .medium))
+                .foregroundStyle(foreground)
+                .frame(width: size, height: size)
+                .background(tint, in: Circle())
+                .overlay { Circle().strokeBorder(Color.white.opacity(0.34), lineWidth: 1) }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
-        .background(
-            Color(nsColor: .controlBackgroundColor).opacity(0.84),
-            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
-        )
-        .overlay {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.10))
-        }
-        .shadow(color: .black.opacity(0.055), radius: 12, y: 4)
+        .buttonStyle(.plain)
+        .help(help)
+        .accessibilityLabel(help)
     }
 }
 
@@ -323,49 +496,13 @@ private struct ToolbarIcon: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: systemName)
-                .font(.system(size: 16, weight: .medium))
+                .font(.system(size: 14, weight: .medium))
                 .frame(width: 28, height: 28)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .help(help)
         .accessibilityLabel(help)
-    }
-}
-
-struct FloatingButtonView: View {
-    @ObservedObject var controller: AppController
-
-    var body: some View {
-        ZStack {
-            Circle()
-                .fill(
-                    LinearGradient(
-                        colors: [Color.accentColor, Color.accentColor.opacity(0.78)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-            Circle()
-                .strokeBorder(Color.white.opacity(0.34))
-            Image(systemName: "sparkles")
-                .font(.system(size: 20, weight: .semibold))
-                .foregroundStyle(.white)
-        }
-        .frame(width: 52, height: 52)
-        .contentShape(Circle())
-        .shadow(color: .black.opacity(0.16), radius: 10, y: 4)
-        .onTapGesture { controller.toggleCompactWindow() }
-        .gesture(
-            DragGesture(minimumDistance: 4)
-                .onChanged { controller.moveFloatingButton(translation: $0.translation) }
-                .onEnded { _ in controller.finishFloatingButtonDrag() }
-        )
-        .padding(8)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("显示或隐藏 PinChat")
-        .accessibilityAddTraits(.isButton)
-        .accessibilityAction { controller.toggleCompactWindow() }
     }
 }
 
@@ -376,55 +513,54 @@ struct SettingsView: View {
     var body: some View {
         ScrollView {
             Form {
-                Section("小窗") {
-                Toggle("默认置顶", isOn: $controller.alwaysOnTop)
-                Toggle("显示常驻悬浮按钮", isOn: $controller.floatingButtonEnabled)
-                LabeledContent("全局快捷键") {
-                    Text("⌥ Space")
-                        .foregroundStyle(.secondary)
-                }
-                Text("小窗和悬浮按钮会加入所有桌面空间，并可显示在普通全屏应用上方。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-                Section("ChatGPT 账号") {
-                if let account = model.account {
-                    LabeledContent("计划", value: account.displayPlan)
-                    if let email = account.email {
-                        LabeledContent("账号", value: email)
+                Section("桌宠与浮窗") {
+                    Toggle("窗口保持置顶", isOn: $controller.alwaysOnTop)
+                    Toggle("显示常驻 Codex 桌宠", isOn: $controller.floatingButtonEnabled)
+                    LabeledContent("全局快捷键") {
+                        Text("⌥⇧Space").foregroundStyle(.secondary)
                     }
-                    Text("登录由本机 Codex 管理；PinChat 不会单独保存或退出该账号。")
+                    Text("桌宠与浮窗会加入所有桌面空间，并可显示在普通全屏应用上方。关闭桌宠后仍可通过快捷键提问。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                } else {
-                    Text(model.connectionStatus.label)
-                        .foregroundStyle(.secondary)
-                    Button("使用 ChatGPT 登录") { model.signIn() }
-                        .disabled(model.connectionStatus == .starting)
                 }
-            }
+
+                Section("ChatGPT 账号") {
+                    if let account = model.account {
+                        LabeledContent("计划", value: account.displayPlan)
+                        if let email = account.email { LabeledContent("账号", value: email) }
+                        Text("登录由本机 Codex 管理；PinChat 不保存密码或 API Key。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text(model.connectionStatus.label).foregroundStyle(.secondary)
+                        Button("使用 ChatGPT 登录") { model.signIn() }
+                            .disabled(model.connectionStatus == .starting)
+                        if case .unavailable = model.connectionStatus {
+                            Button("重新连接") { model.retryConnection() }
+                        }
+                    }
+                }
 
                 Section("本机 Codex") {
-                if let configuration = model.codexConfiguration {
-                    LabeledContent("模型", value: configuration.displayModel)
-                    LabeledContent("推理强度", value: configuration.displayReasoningEffort)
-                    LabeledContent("人格", value: configuration.displayPersonality)
-                } else {
-                    Text("使用 Codex 当前默认模型、人格和推理设置")
-                        .foregroundStyle(.secondary)
+                    if let configuration = model.codexConfiguration {
+                        LabeledContent("模型", value: configuration.displayModel)
+                        LabeledContent("推理强度", value: configuration.displayReasoningEffort)
+                        LabeledContent("人格", value: configuration.displayPersonality)
+                    } else {
+                        Text("使用 Codex 当前默认模型、人格和推理设置")
+                            .foregroundStyle(.secondary)
+                    }
                 }
-            }
 
-                Section("初版说明") {
-                Text("PinChat 是 Codex 的轻量置顶伴随组件，没有独立主页面。右上角按钮会在 Codex 中打开当前会话。其他 AI API、附件和语音将在后续版本中考虑。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Section("PinChat 2.0") {
+                    Text("点击桌宠旁的铅笔提问；完成卡可展开回答、确认完成，或把同一任务交给 Codex 主应用继续。PinChat 不提供历史任务列表。语音、附件和其他 AI API 为未来候选项。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
             .formStyle(.grouped)
         }
         .padding(8)
-        .frame(minWidth: 420, idealWidth: 440, minHeight: 420, idealHeight: 500)
+        .frame(minWidth: 420, idealWidth: 440, minHeight: 440, idealHeight: 510)
     }
 }

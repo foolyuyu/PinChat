@@ -51,6 +51,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var codexConfiguration: CodexConfiguration?
     @Published private(set) var connectionStatus: ConnectionStatus = .starting
     @Published private(set) var isGenerating = false
+    @Published private(set) var lastTurnError: String?
     @Published var alertMessage: String?
 
     private let service: CodexAppServer
@@ -59,10 +60,23 @@ final class AppModel: ObservableObject {
     private var activeAssistantMessageID: UUID?
     private var syncTask: Task<Void, Never>?
     private var syncInFlight = false
+    private var needsRestartAfterExternalHandoff = false
 
     var selectedSession: ChatSession? {
         guard let selectedSessionID else { return nil }
         return sessions.first { $0.id == selectedSessionID }
+    }
+
+    var latestUserText: String {
+        selectedSession?.messages.last(where: { $0.role == .user })?.text ?? ""
+    }
+
+    var latestAssistantText: String {
+        selectedSession?.messages.last(where: { $0.role == .assistant })?.text ?? ""
+    }
+
+    var hasCurrentConversation: Bool {
+        selectedSession?.messages.isEmpty == false
     }
 
     init(service: CodexAppServer = CodexAppServer(), store: SessionStore = SessionStore()) {
@@ -78,8 +92,23 @@ final class AppModel: ObservableObject {
         service.onAccountUpdated = { [weak self] in
             Task { @MainActor in self?.refreshAccount() }
         }
-        service.onAgentDelta = { [weak self] threadID, delta in
-            Task { @MainActor in self?.appendAgentDelta(threadID: threadID, delta: delta) }
+        service.onAgentDelta = { [weak self] threadID, itemID, delta in
+            Task {
+                @MainActor in self?.appendAgentDelta(
+                    threadID: threadID,
+                    itemID: itemID,
+                    delta: delta
+                )
+            }
+        }
+        service.onAgentMessageCompleted = { [weak self] threadID, itemID, text in
+            Task {
+                @MainActor in self?.completeAgentMessage(
+                    threadID: threadID,
+                    itemID: itemID,
+                    text: text
+                )
+            }
         }
         service.onTurnCompleted = { [weak self] threadID, error in
             Task { @MainActor in self?.finishTurn(threadID: threadID, error: error) }
@@ -88,12 +117,14 @@ final class AppModel: ObservableObject {
             Task { @MainActor in
                 self?.connectionStatus = .unavailable("本地服务已停止")
                 self?.isGenerating = false
+                self?.lastTurnError = message
                 self?.alertMessage = message
             }
         }
     }
 
     func start() {
+        needsRestartAfterExternalHandoff = false
         connectionStatus = .starting
         service.start { [weak self] result in
             Task { @MainActor in
@@ -160,6 +191,7 @@ final class AppModel: ObservableObject {
     @discardableResult
     func newConversation() -> UUID {
         if isGenerating { stopGenerating() }
+        lastTurnError = nil
         if let selectedSession,
            selectedSession.codexThreadID == nil,
            selectedSession.messages.isEmpty {
@@ -193,6 +225,8 @@ final class AppModel: ObservableObject {
             alertMessage = PinChatError.notSignedIn.localizedDescription
             return
         }
+
+        lastTurnError = nil
 
         let sessionID = selectedSessionID ?? newConversation()
         guard let index = sessions.firstIndex(where: { $0.id == sessionID }) else { return }
@@ -236,6 +270,39 @@ final class AppModel: ObservableObject {
     }
 
     func retryConnection() {
+        start()
+    }
+
+    func releaseCurrentConversationForCodex(
+        completion: @escaping @MainActor @Sendable () -> Void
+    ) {
+        guard let threadID = selectedSession?.codexThreadID else {
+            completion()
+            return
+        }
+        syncTask?.cancel()
+        syncTask = nil
+        service.releaseThreadForExternalClient(threadID: threadID) { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                self.syncInFlight = false
+                self.needsRestartAfterExternalHandoff = true
+                self.connectionStatus = .starting
+                completion()
+            }
+        }
+    }
+
+    func completeExternalHandoff() {
+        _ = newConversation()
+    }
+
+    func recoverAfterExternalHandoffFailure() {
+        restartAfterExternalHandoffIfNeeded()
+    }
+
+    func restartAfterExternalHandoffIfNeeded() {
+        guard needsRestartAfterExternalHandoff else { return }
         start()
     }
 
@@ -299,7 +366,7 @@ final class AppModel: ObservableObject {
         persist()
     }
 
-    private func appendAgentDelta(threadID: String, delta: String) {
+    private func appendAgentDelta(threadID: String, itemID: String, delta: String) {
         guard isGenerating,
               let sessionID = activeSessionID,
               let messageID = activeAssistantMessageID,
@@ -307,8 +374,30 @@ final class AppModel: ObservableObject {
               sessions[sessionIndex].codexThreadID == threadID,
               let messageIndex = sessions[sessionIndex].messages.firstIndex(where: { $0.id == messageID })
         else { return }
+        if let sourceID = sessions[sessionIndex].messages[messageIndex].sourceID,
+           sourceID != itemID {
+            return
+        }
+        sessions[sessionIndex].messages[messageIndex].sourceID = itemID
         sessions[sessionIndex].messages[messageIndex].text += delta
         sessions[sessionIndex].updatedAt = Date()
+    }
+
+    private func completeAgentMessage(threadID: String, itemID: String, text: String) {
+        guard isGenerating,
+              let sessionID = activeSessionID,
+              let messageID = activeAssistantMessageID,
+              let sessionIndex = sessions.firstIndex(where: { $0.id == sessionID }),
+              sessions[sessionIndex].codexThreadID == threadID,
+              let messageIndex = sessions[sessionIndex].messages.firstIndex(where: { $0.id == messageID })
+        else { return }
+        sessions[sessionIndex].messages[messageIndex].sourceID = itemID
+        sessions[sessionIndex].messages[messageIndex].text = CodexAppServer.authoritativeAgentText(
+            streamedText: sessions[sessionIndex].messages[messageIndex].text,
+            completedText: text
+        )
+        sessions[sessionIndex].updatedAt = Date()
+        persist()
     }
 
     private func finishTurn(threadID: String, error: String?) {
@@ -320,8 +409,11 @@ final class AppModel: ObservableObject {
         activeSessionID = nil
         activeAssistantMessageID = nil
         if let error {
+            lastTurnError = error
             alertMessage = error
             removeEmptyAssistantMessage(in: index)
+        } else {
+            lastTurnError = nil
         }
         persist()
     }
@@ -334,6 +426,7 @@ final class AppModel: ObservableObject {
         isGenerating = false
         activeSessionID = nil
         activeAssistantMessageID = nil
+        lastTurnError = message
         alertMessage = message
         persist()
     }

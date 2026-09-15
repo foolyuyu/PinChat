@@ -15,7 +15,7 @@ final class GlobalHotKey: @unchecked Sendable {
     }
 
     @discardableResult
-    func registerOptionSpace() -> Bool {
+    func registerOptionShiftSpace() -> Bool {
         unregister()
 
         var eventType = EventTypeSpec(
@@ -43,7 +43,7 @@ final class GlobalHotKey: @unchecked Sendable {
         let hotKeyID = EventHotKeyID(signature: OSType(0x50434854), id: 1)
         let registerStatus = RegisterEventHotKey(
             UInt32(kVK_Space),
-            UInt32(optionKey),
+            UInt32(optionKey | shiftKey),
             hotKeyID,
             GetApplicationEventTarget(),
             0,

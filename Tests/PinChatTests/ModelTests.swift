@@ -99,6 +99,110 @@ import Testing
     #expect(right.origin == NSPoint(x: 1124, y: 8))
 }
 
+@Test func floatingButtonDragPreservesPointerGrabOffset() {
+    let origin = WindowPlacement.floatingButtonOrigin(
+        pointerLocation: NSPoint(x: 850, y: 620),
+        grabOffset: NSSize(width: 18, height: 41)
+    )
+
+    #expect(origin == NSPoint(x: 832, y: 579))
+}
+
+@Test func answerExpandsTowardAvailableScreenSpace() {
+    let screen = NSRect(x: 0, y: 0, width: 1440, height: 900)
+    let highPet = NSRect(x: 1000, y: 650, width: 184, height: 184)
+    let lowPet = NSRect(x: 1000, y: 40, width: 184, height: 184)
+
+    #expect(WindowPlacement.preferredAttachmentDirection(
+        anchor: highPet,
+        in: screen,
+        requiredHeight: 500
+    ) == .below)
+    #expect(WindowPlacement.preferredAttachmentDirection(
+        anchor: lowPet,
+        in: screen,
+        requiredHeight: 500
+    ) == .above)
+}
+
+@Test func attachedStatusAndAnswerStayOrderedAndVisible() throws {
+    let screen = NSRect(x: 0, y: 0, width: 1200, height: 800)
+    let pet = NSRect(x: 900, y: 620, width: 184, height: 184)
+    let frames = WindowPlacement.stackedFrames(
+        sizes: [NSSize(width: 660, height: 104), NSSize(width: 620, height: 420)],
+        attachedTo: pet,
+        in: screen,
+        direction: .below,
+        gap: 8
+    )
+
+    #expect(frames.count == 2)
+    let status = try #require(frames.first)
+    let answer = try #require(frames.last)
+    #expect(answer.maxY <= status.minY)
+    #expect(screen.contains(status))
+    #expect(screen.contains(answer))
+}
+
+@Test func manuallyMovingAnswerDetachesIt() {
+    #expect(AnswerAttachmentState.attached.afterWindowMove(isProgrammatic: true) == .attached)
+    #expect(AnswerAttachmentState.attached.afterWindowMove(isProgrammatic: false) == .detached)
+    #expect(AnswerAttachmentState.detached.afterWindowMove(isProgrammatic: true) == .detached)
+}
+
+@Test func petAnimationTracksConversationState() {
+    #expect(PetAnimation.resolve(isDragging: true, isGenerating: true, hasError: false, hasAnswer: false) == .jumping)
+    #expect(PetAnimation.resolve(isDragging: false, isGenerating: true, hasError: false, hasAnswer: false) == .working)
+    #expect(PetAnimation.resolve(isDragging: false, isGenerating: false, hasError: true, hasAnswer: false) == .failed)
+    #expect(PetAnimation.resolve(isDragging: false, isGenerating: false, hasError: false, hasAnswer: true) == .waving)
+    #expect(PetAnimation.resolve(isDragging: false, isGenerating: false, hasError: false, hasAnswer: false) == .idle)
+}
+
+@Test func transparentSpriteCellsAreFilteredOut() throws {
+    let colorSpace = CGColorSpaceCreateDeviceRGB()
+    let blankContext = try #require(CGContext(
+        data: nil,
+        width: 64,
+        height: 64,
+        bitsPerComponent: 8,
+        bytesPerRow: 64 * 4,
+        space: colorSpace,
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+    ))
+    let blank = try #require(blankContext.makeImage())
+
+    let filledContext = try #require(CGContext(
+        data: nil,
+        width: 64,
+        height: 64,
+        bitsPerComponent: 8,
+        bytesPerRow: 64 * 4,
+        space: colorSpace,
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+    ))
+    filledContext.setFillColor(NSColor.systemBlue.cgColor)
+    filledContext.fill(CGRect(x: 8, y: 8, width: 48, height: 48))
+    let filled = try #require(filledContext.makeImage())
+
+    #expect(!PetSpriteStore.hasVisibleContent(blank))
+    #expect(PetSpriteStore.hasVisibleContent(filled))
+}
+
+@Test func onlyFinalAgentMessagesAreDisplayed() {
+    #expect(!CodexAppServer.shouldDisplayAgentMessage(phase: "commentary"))
+    #expect(CodexAppServer.shouldDisplayAgentMessage(phase: "final_answer"))
+    #expect(CodexAppServer.shouldDisplayAgentMessage(phase: nil))
+}
+
+@Test func completedAgentMessageReplacesDuplicatedStreamedText() {
+    let text = CodexAppServer.authoritativeAgentText(
+        streamedText: "最终回答\n\n最终回答",
+        completedText: "最终回答"
+    )
+
+    #expect(text == "最终回答")
+}
+
 @Test func reconciliationDoesNotEraseInterruptedPartialAnswer() {
     let existing = [
         ChatMessage(sourceID: "user-1", role: .user, text: "问题"),

@@ -1,5 +1,20 @@
 import AppKit
+import QuartzCore
 import SwiftUI
+
+enum AttachmentDirection: String, Equatable, Sendable {
+    case above
+    case below
+}
+
+enum AnswerAttachmentState: Equatable, Sendable {
+    case attached
+    case detached
+
+    func afterWindowMove(isProgrammatic: Bool) -> AnswerAttachmentState {
+        isProgrammatic ? self : .detached
+    }
+}
 
 enum WindowPlacement {
     static func clamped(_ frame: NSRect, to visibleFrame: NSRect) -> NSRect {
@@ -26,6 +41,75 @@ enum WindowPlacement {
         )
         return result
     }
+
+    static func floatingButtonOrigin(
+        pointerLocation: NSPoint,
+        grabOffset: NSSize
+    ) -> NSPoint {
+        NSPoint(
+            x: pointerLocation.x - grabOffset.width,
+            y: pointerLocation.y - grabOffset.height
+        )
+    }
+
+    static func preferredAttachmentDirection(
+        anchor: NSRect,
+        in visibleFrame: NSRect,
+        requiredHeight: CGFloat,
+        gap: CGFloat = 10
+    ) -> AttachmentDirection {
+        let below = anchor.minY - visibleFrame.minY - gap
+        let above = visibleFrame.maxY - anchor.maxY - gap
+        if below >= requiredHeight { return .below }
+        if above >= requiredHeight { return .above }
+        return below >= above ? .below : .above
+    }
+
+    static func stackedFrames(
+        sizes: [NSSize],
+        attachedTo anchor: NSRect,
+        in visibleFrame: NSRect,
+        direction: AttachmentDirection,
+        gap: CGFloat = 10
+    ) -> [NSRect] {
+        guard !sizes.isEmpty else { return [] }
+        var frames: [NSRect] = []
+        var cursor = direction == .below ? anchor.minY - gap : anchor.maxY + gap
+
+        for size in sizes {
+            let width = min(size.width, visibleFrame.width)
+            let height = min(size.height, visibleFrame.height)
+            let x = min(
+                max(anchor.midX - width / 2, visibleFrame.minX),
+                visibleFrame.maxX - width
+            )
+            let y: CGFloat
+            if direction == .below {
+                y = cursor - height
+                cursor = y - gap
+            } else {
+                y = cursor
+                cursor = y + height + gap
+            }
+            frames.append(NSRect(x: x, y: y, width: width, height: height))
+        }
+
+        guard let minY = frames.map(\.minY).min(),
+              let maxY = frames.map(\.maxY).max() else { return frames }
+        let shift: CGFloat
+        if minY < visibleFrame.minY {
+            shift = visibleFrame.minY - minY
+        } else if maxY > visibleFrame.maxY {
+            shift = visibleFrame.maxY - maxY
+        } else {
+            shift = 0
+        }
+        return frames.map { frame in
+            var shifted = frame
+            shifted.origin.y += shift
+            return clamped(shifted, to: visibleFrame)
+        }
+    }
 }
 
 enum PanelPresentationPolicy {
@@ -48,65 +132,84 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
     @Published var alwaysOnTop: Bool {
         didSet {
             defaults.set(alwaysOnTop, forKey: Keys.alwaysOnTop)
-            updatePanelLevel()
+            updatePanelLevels()
         }
     }
     @Published var floatingButtonEnabled: Bool {
         didSet {
             defaults.set(floatingButtonEnabled, forKey: Keys.floatingButtonEnabled)
-            updateFloatingButtonVisibility()
+            updatePetVisibility()
         }
     }
+    @Published private(set) var isComposerVisible = false
+    @Published private(set) var isStatusVisible = false
+    @Published private(set) var isAnswerVisible = false
+    @Published private(set) var isDraggingPet = false
+    @Published private(set) var answerAttachment: AnswerAttachmentState = .attached
+    @Published private(set) var expansionDirection: AttachmentDirection = .below
+
+    var answerDetached: Bool { answerAttachment == .detached }
 
     let model = AppModel()
+    let spriteStore = PetSpriteStore()
 
     private let defaults = UserDefaults.standard
-    private var compactPanel: ChatPanel?
-    private var floatingButtonPanel: NSPanel?
+    private var petPanel: NSPanel?
+    private var composerPanel: ChatPanel?
+    private var statusPanel: ChatPanel?
+    private var answerPanel: ChatPanel?
     private var settingsWindow: NSWindow?
     private var statusItem: NSStatusItem?
     private var globalHotKey: GlobalHotKey?
-    private var buttonDragStart: NSPoint?
+    private var petDragOffset: NSSize?
+    private var codexHandoffInProgress = false
     private var screenParametersObserver: NSObjectProtocol?
+    private var positioningPanels = false
 
     private enum Keys {
         static let alwaysOnTop = "alwaysOnTop"
         static let floatingButtonEnabled = "floatingButtonEnabled"
-        static let compactFrame = "compactFrame"
-        static let floatingButtonFrame = "floatingButtonFrame"
-        static let hasLaunched = "hasLaunched"
+        static let petFrame = "petFrameV2"
+        static let legacyFloatingButtonFrame = "floatingButtonFrame"
+        static let answerFrame = "answerFrameV2"
+        static let hasLaunchedV2 = "hasLaunchedV2"
+    }
+
+    private enum Metrics {
+        static let petSize = NSSize(width: 140, height: 144)
+        static let composerSize = NSSize(width: 450, height: 66)
+        static let statusSize = NSSize(width: 470, height: 82)
+        static let answerSize = NSSize(width: 520, height: 420)
+        static let gap: CGFloat = 7
     }
 
     private override init() {
-        if defaults.object(forKey: Keys.alwaysOnTop) == nil {
-            alwaysOnTop = true
-        } else {
-            alwaysOnTop = defaults.bool(forKey: Keys.alwaysOnTop)
-        }
-        if defaults.object(forKey: Keys.floatingButtonEnabled) == nil {
-            floatingButtonEnabled = true
-        } else {
-            floatingButtonEnabled = defaults.bool(forKey: Keys.floatingButtonEnabled)
-        }
+        alwaysOnTop = defaults.object(forKey: Keys.alwaysOnTop) == nil
+            ? true
+            : defaults.bool(forKey: Keys.alwaysOnTop)
+        floatingButtonEnabled = defaults.object(forKey: Keys.floatingButtonEnabled) == nil
+            ? true
+            : defaults.bool(forKey: Keys.floatingButtonEnabled)
         super.init()
     }
 
     func launch() {
         NSApp.setActivationPolicy(.accessory)
-        createCompactPanel()
-        createFloatingButtonPanel()
+        createPetPanel()
+        createComposerPanel()
+        createStatusPanel()
+        createAnswerPanel()
         createStatusItem()
         registerGlobalHotKey()
         observeScreenChanges()
         model.start()
+        updatePanelLevels()
+        updatePetVisibility()
 
-        if defaults.bool(forKey: Keys.hasLaunched) {
-            compactPanel?.orderOut(nil)
-        } else {
-            defaults.set(true, forKey: Keys.hasLaunched)
-            showCompactWindow()
+        if !defaults.bool(forKey: Keys.hasLaunchedV2) {
+            defaults.set(true, forKey: Keys.hasLaunchedV2)
+            showComposer()
         }
-        updateFloatingButtonVisibility()
     }
 
     func terminate() {
@@ -118,43 +221,158 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
     }
 
     func toggleCompactWindow() {
-        if compactPanel?.isVisible == true {
+        if isComposerVisible || isStatusVisible || isAnswerVisible {
             hideCompactWindow()
         } else {
-            showCompactWindow()
+            showComposer()
         }
     }
 
     func showCompactWindow() {
-        guard let panel = compactPanel else { return }
-        ensureWindowIsOnScreen(panel)
-        panel.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        showComposer()
+    }
+
+    func toggleComposer() {
+        if isComposerVisible {
+            hideComposer()
+        } else {
+            showComposer()
+        }
     }
 
     func hideCompactWindow() {
-        compactPanel?.orderOut(nil)
+        isComposerVisible = false
+        isStatusVisible = false
+        isAnswerVisible = false
+        composerPanel?.orderOut(nil)
+        statusPanel?.orderOut(nil)
+        answerPanel?.orderOut(nil)
+    }
+
+    func showComposer() {
+        model.restartAfterExternalHandoffIfNeeded()
+        if model.isGenerating {
+            showStatus()
+            return
+        }
+        isStatusVisible = false
+        isAnswerVisible = false
+        isComposerVisible = true
+        statusPanel?.orderOut(nil)
+        answerPanel?.orderOut(nil)
+        positionAttachedPanels()
+        if let composerPanel { revealHorizontally(composerPanel) }
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func hideComposer() {
+        isComposerVisible = false
+        guard let panel = composerPanel, panel.isVisible else { return }
+        let original = panel.frame
+        let collapsed = NSRect(
+            x: original.midX - 24,
+            y: original.minY,
+            width: 48,
+            height: original.height
+        )
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.15
+            context.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            panel.animator().alphaValue = 0
+            panel.animator().setFrame(collapsed, display: true)
+        } completionHandler: {
+            Task { @MainActor in
+                panel.orderOut(nil)
+                panel.alphaValue = 1
+                panel.setFrame(original, display: false)
+            }
+        }
+    }
+
+    func sendMessage(_ text: String) {
+        guard model.account != nil else {
+            showComposer()
+            model.alertMessage = PinChatError.notSignedIn.localizedDescription
+            return
+        }
+        isComposerVisible = false
+        isAnswerVisible = false
+        isStatusVisible = true
+        composerPanel?.orderOut(nil)
+        answerPanel?.orderOut(nil)
+        model.send(text)
+        positionAttachedPanels()
+        if let statusPanel { revealWithLift(statusPanel) }
+    }
+
+    func showStatus() {
+        isComposerVisible = false
+        isStatusVisible = true
+        composerPanel?.orderOut(nil)
+        positionAttachedPanels()
+        if let statusPanel, !statusPanel.isVisible {
+            revealWithLift(statusPanel)
+        } else {
+            statusPanel?.orderFrontRegardless()
+        }
+    }
+
+    func toggleAnswer() {
+        guard !model.isGenerating, !model.latestAssistantText.isEmpty else { return }
+        if isAnswerVisible {
+            isAnswerVisible = false
+            answerPanel?.orderOut(nil)
+            positionAttachedPanels()
+        } else {
+            isStatusVisible = true
+            isAnswerVisible = true
+            answerAttachment = .attached
+            positionAttachedPanels()
+            statusPanel?.orderFrontRegardless()
+            if let answerPanel { revealWithLift(answerPanel) }
+            NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+
+    func closeAnswer() {
+        isAnswerVisible = false
+        answerPanel?.orderOut(nil)
+        positionAttachedPanels()
+    }
+
+    func confirmCompleted() {
+        if model.isGenerating { model.stopGenerating() }
+        _ = model.newConversation()
+        hideCompactWindow()
     }
 
     func openCurrentConversationInCodex() {
+        guard !codexHandoffInProgress else { return }
+        guard !model.isGenerating else {
+            model.alertMessage = "请先等待当前回答完成或停止生成，再在 Codex 中继续。"
+            return
+        }
         guard let threadID = model.selectedSession?.codexThreadID else {
-            model.alertMessage = "请先发送一条消息，创建 Codex 会话后再打开。"
+            model.alertMessage = "请先发送一条消息，创建 Codex 任务后再打开。"
             return
         }
-        guard let encodedID = threadID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) else {
-            model.alertMessage = "无法创建 Codex 会话链接。"
+        guard let encodedID = threadID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+              let url = URL(string: "codex://threads/\(encodedID)") else {
+            model.alertMessage = "无法创建 Codex 任务链接。"
             return
         }
-        let deepLink = "codex://threads/\(encodedID)"
-        guard let url = URL(string: deepLink) else {
-            model.alertMessage = "无法创建 Codex 会话链接。"
-            return
+        codexHandoffInProgress = true
+        model.releaseCurrentConversationForCodex { [weak self] in
+            guard let self else { return }
+            self.codexHandoffInProgress = false
+            guard NSWorkspace.shared.open(url) else {
+                self.model.recoverAfterExternalHandoffFailure()
+                self.model.alertMessage = "无法打开 Codex。请确认 ChatGPT 桌面应用已安装。"
+                return
+            }
+            self.model.completeExternalHandoff()
+            self.hideCompactWindow()
         }
-        guard NSWorkspace.shared.open(url) else {
-            model.alertMessage = "无法打开 Codex。请确认 ChatGPT 桌面应用已安装。"
-            return
-        }
-        hideCompactWindow()
     }
 
     func showSettings() {
@@ -163,13 +381,13 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
         if settingsWindow == nil {
             let content = SettingsView(model: model, controller: self)
             let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 440, height: 500),
+                contentRect: NSRect(x: 0, y: 0, width: 440, height: 510),
                 styleMask: [.titled, .closable],
                 backing: .buffered,
                 defer: false
             )
             window.title = "PinChat 设置"
-            window.minSize = NSSize(width: 420, height: 420)
+            window.minSize = NSSize(width: 420, height: 440)
             window.contentViewController = NSHostingController(rootView: content)
             window.center()
             window.isReleasedWhenClosed = false
@@ -179,115 +397,205 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    func moveFloatingButton(translation: CGSize) {
-        guard let panel = floatingButtonPanel else { return }
-        if buttonDragStart == nil { buttonDragStart = panel.frame.origin }
-        guard let start = buttonDragStart else { return }
-        var origin = NSPoint(
-            x: start.x + translation.width,
-            y: start.y - translation.height
-        )
-        let screen = screen(containing: NSPoint(
-            x: origin.x + panel.frame.width / 2,
-            y: origin.y + panel.frame.height / 2
-        )) ?? NSScreen.main
-        if let visible = screen?.visibleFrame {
-            origin.x = min(max(origin.x, visible.minX), visible.maxX - panel.frame.width)
-            origin.y = min(max(origin.y, visible.minY), visible.maxY - panel.frame.height)
+    func movePet(to pointerLocation: NSPoint) {
+        guard let panel = petPanel else { return }
+        if petDragOffset == nil {
+            isDraggingPet = true
+            petDragOffset = NSSize(
+                width: pointerLocation.x - panel.frame.minX,
+                height: pointerLocation.y - panel.frame.minY
+            )
         }
-        panel.setFrameOrigin(origin)
+        guard let grabOffset = petDragOffset else { return }
+        let requestedOrigin = WindowPlacement.floatingButtonOrigin(
+            pointerLocation: pointerLocation,
+            grabOffset: grabOffset
+        )
+        let requested = NSRect(origin: requestedOrigin, size: panel.frame.size)
+        let center = NSPoint(x: requested.midX, y: requested.midY)
+        guard let visible = (screen(containing: center) ?? NSScreen.main)?.visibleFrame else { return }
+        positioningPanels = true
+        panel.setFrame(
+            WindowPlacement.clamped(requested, to: visible.insetBy(dx: 10, dy: 10)),
+            display: true
+        )
+        positionAttachedPanels()
+        positioningPanels = false
     }
 
-    func finishFloatingButtonDrag() {
-        guard let panel = floatingButtonPanel else { return }
-        buttonDragStart = nil
-        let center = NSPoint(x: panel.frame.midX, y: panel.frame.midY)
-        guard let visible = (screen(containing: center) ?? NSScreen.main)?.visibleFrame else { return }
-        let frame = WindowPlacement.snappedFloatingButton(panel.frame, to: visible)
-        panel.setFrame(frame, display: true, animate: true)
-        saveFrame(panel.frame, key: Keys.floatingButtonFrame)
+    func finishPetDrag() {
+        guard let panel = petPanel else { return }
+        petDragOffset = nil
+        isDraggingPet = false
+        saveFrame(panel.frame, key: Keys.petFrame)
+        positionAttachedPanels(animated: true)
     }
 
     func windowDidMove(_ notification: Notification) {
-        guard let window = notification.object as? NSWindow else { return }
-        if window === compactPanel {
-            saveFrame(window.frame, key: Keys.compactFrame)
+        guard let window = notification.object as? NSWindow, !positioningPanels else { return }
+        if window === answerPanel {
+            answerAttachment = answerAttachment.afterWindowMove(isProgrammatic: false)
+            saveFrame(window.frame, key: Keys.answerFrame)
         }
     }
 
     func windowDidResize(_ notification: Notification) {
         guard let window = notification.object as? NSWindow else { return }
-        if window === compactPanel {
-            saveFrame(window.frame, key: Keys.compactFrame)
+        if window === answerPanel {
+            saveFrame(window.frame, key: Keys.answerFrame)
         }
     }
 
+    func windowDidEndLiveResize(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow, window === answerPanel else { return }
+        if answerDetached {
+            ensureWindowIsOnScreen(window)
+        } else {
+            positionAttachedPanels(animated: true)
+        }
+        saveFrame(window.frame, key: Keys.answerFrame)
+    }
+
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        if sender === compactPanel {
-            hideCompactWindow()
+        if sender === answerPanel {
+            closeAnswer()
             return false
         }
         return true
     }
 
-    private func createCompactPanel() {
-        let defaultFrame = NSRect(x: 0, y: 0, width: 420, height: 560)
-        let frame = restoredFrame(key: Keys.compactFrame) ?? defaultFrame
-        let panel = ChatPanel(
-            contentRect: frame,
-            styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
-            backing: .buffered,
-            defer: false
-        )
-        panel.titleVisibility = .hidden
-        panel.titlebarAppearsTransparent = true
-        panel.isMovableByWindowBackground = true
-        panel.standardWindowButton(.closeButton)?.isHidden = true
-        panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
-        panel.standardWindowButton(.zoomButton)?.isHidden = true
-        panel.backgroundColor = .clear
-        panel.isOpaque = false
-        panel.hasShadow = true
-        panel.minSize = NSSize(width: 360, height: 440)
-        panel.hidesOnDeactivate = false
-        panel.isFloatingPanel = true
-        panel.collectionBehavior = PanelPresentationPolicy.crossSpaceBehavior
-        panel.contentViewController = NSHostingController(
-            rootView: CompactChatView(model: model, controller: self)
-        )
-        panel.delegate = self
-        compactPanel = panel
-        updatePanelLevel()
-        ensureWindowIsOnScreen(panel)
-        if restoredFrame(key: Keys.compactFrame) == nil { panel.center() }
-    }
-
-    private func createFloatingButtonPanel() {
-        let size = NSSize(width: 68, height: 68)
-        let fallback = defaultFloatingButtonFrame(size: size)
-        let frame = restoredFrame(key: Keys.floatingButtonFrame) ?? fallback
+    private func createPetPanel() {
+        var frame = restoredFrame(key: Keys.petFrame)
+            ?? migratedPetFrame()
+            ?? defaultPetFrame()
+        frame.size = Metrics.petSize
         let panel = NSPanel(
             contentRect: frame,
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
-        panel.level = .statusBar
+        configureFloating(panel, hasShadow: false)
+        install(PetRootView(model: model, controller: self), in: panel)
+        petPanel = panel
+        ensureWindowIsOnScreen(panel)
+    }
+
+    private func createComposerPanel() {
+        let panel = ChatPanel(
+            contentRect: NSRect(origin: .zero, size: Metrics.composerSize),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        configureFloating(panel, hasShadow: false)
+        install(MiniComposerView(model: model, controller: self), in: panel)
+        composerPanel = panel
+    }
+
+    private func createStatusPanel() {
+        let panel = ChatPanel(
+            contentRect: NSRect(origin: .zero, size: Metrics.statusSize),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        configureFloating(panel, hasShadow: false)
+        install(TaskStatusCard(model: model, controller: self), in: panel)
+        statusPanel = panel
+    }
+
+    private func createAnswerPanel() {
+        let restored = restoredFrame(key: Keys.answerFrame)
+            ?? NSRect(origin: .zero, size: Metrics.answerSize)
+        let panel = ChatPanel(
+            contentRect: restored,
+            styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        panel.titleVisibility = .hidden
+        panel.titlebarAppearsTransparent = true
+        panel.standardWindowButton(.closeButton)?.isHidden = true
+        panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        panel.standardWindowButton(.zoomButton)?.isHidden = true
+        panel.isMovableByWindowBackground = true
+        panel.minSize = NSSize(width: 400, height: 300)
+        panel.maxSize = NSSize(width: 900, height: 900)
+        configureFloating(panel, hasShadow: true)
+        install(AnswerPanelView(model: model, controller: self), in: panel)
+        panel.delegate = self
+        answerPanel = panel
+    }
+
+    private func configureFloating(_ panel: NSPanel, hasShadow: Bool) {
         panel.backgroundColor = .clear
         panel.isOpaque = false
-        panel.hasShadow = false
+        panel.hasShadow = hasShadow
         panel.hidesOnDeactivate = false
+        panel.isFloatingPanel = true
         panel.collectionBehavior = PanelPresentationPolicy.crossSpaceBehavior
-        panel.contentViewController = NSHostingController(rootView: FloatingButtonView(controller: self))
-        floatingButtonPanel = panel
-        ensureWindowIsOnScreen(panel)
+    }
+
+    private func revealHorizontally(_ panel: NSPanel) {
+        let target = panel.frame
+        guard !panel.isVisible else {
+            panel.makeKeyAndOrderFront(nil)
+            return
+        }
+        let collapsed = NSRect(
+            x: target.midX - 24,
+            y: target.minY,
+            width: 48,
+            height: target.height
+        )
+        panel.alphaValue = 0
+        panel.setFrame(collapsed, display: true)
+        panel.makeKeyAndOrderFront(nil)
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.23
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            panel.animator().alphaValue = 1
+            panel.animator().setFrame(target, display: true)
+        }
+    }
+
+    private func revealWithLift(_ panel: NSPanel) {
+        let target = panel.frame
+        guard !panel.isVisible else {
+            panel.orderFrontRegardless()
+            return
+        }
+        var start = target
+        start.origin.y += expansionDirection == .below ? 10 : -10
+        panel.alphaValue = 0
+        panel.setFrame(start, display: true)
+        panel.makeKeyAndOrderFront(nil)
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.22
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            panel.animator().alphaValue = 1
+            panel.animator().setFrame(target, display: true)
+        }
+    }
+
+    private func install<V: View>(_ rootView: V, in panel: NSPanel) {
+        let host = NSHostingController(rootView: rootView)
+        host.view.wantsLayer = true
+        host.view.layer?.backgroundColor = NSColor.clear.cgColor
+        panel.contentViewController = host
+        panel.contentView?.wantsLayer = true
+        panel.contentView?.layer?.backgroundColor = NSColor.clear.cgColor
     }
 
     private func createStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        item.button?.image = NSImage(systemSymbolName: "bubble.left.and.sparkles", accessibilityDescription: "PinChat")
+        item.button?.image = NSImage(
+            systemSymbolName: "bubble.left.and.sparkles",
+            accessibilityDescription: "PinChat"
+        )
         let menu = NSMenu()
-        menu.addItem(withTitle: "显示/隐藏小窗", action: #selector(toggleFromMenu), keyEquivalent: "")
+        menu.addItem(withTitle: "输入问题", action: #selector(toggleFromMenu), keyEquivalent: "")
         menu.addItem(withTitle: "在 Codex 中打开", action: #selector(openCodexFromMenu), keyEquivalent: "")
         menu.addItem(withTitle: "设置…", action: #selector(openSettingsFromMenu), keyEquivalent: ",")
         menu.addItem(.separator())
@@ -300,23 +608,67 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
     private func registerGlobalHotKey() {
         let hotKey = GlobalHotKey { [weak self] in self?.toggleCompactWindow() }
         globalHotKey = hotKey
-        if !hotKey.registerOptionSpace() {
-            model.alertMessage = "无法注册 ⌥ Space，全局快捷键可能已被其他应用占用。"
+        if !hotKey.registerOptionShiftSpace() {
+            model.alertMessage = "无法注册 ⌥⇧Space，全局快捷键可能已被其他应用占用。"
         }
     }
 
-    private func updatePanelLevel() {
-        compactPanel?.level = alwaysOnTop ? .floating : .normal
+    private func updatePanelLevels() {
+        let level: NSWindow.Level = alwaysOnTop ? .statusBar : .floating
+        [petPanel, composerPanel, statusPanel, answerPanel].forEach { $0?.level = level }
     }
 
-    private func updateFloatingButtonVisibility() {
-        guard let panel = floatingButtonPanel else { return }
+    private func updatePetVisibility() {
+        guard let panel = petPanel else { return }
         if floatingButtonEnabled {
             ensureWindowIsOnScreen(panel)
             panel.orderFrontRegardless()
         } else {
             panel.orderOut(nil)
         }
+    }
+
+    private func positionAttachedPanels(animated: Bool = false) {
+        guard let petPanel else { return }
+        let center = NSPoint(x: petPanel.frame.midX, y: petPanel.frame.midY)
+        guard let visible = (screen(containing: center) ?? NSScreen.main)?.visibleFrame else { return }
+
+        var panels: [NSPanel] = []
+        var sizes: [NSSize] = []
+        if isComposerVisible, let composerPanel {
+            panels.append(composerPanel)
+            sizes.append(Metrics.composerSize)
+        } else if isStatusVisible, let statusPanel {
+            panels.append(statusPanel)
+            sizes.append(Metrics.statusSize)
+            if isAnswerVisible, !answerDetached, let answerPanel {
+                panels.append(answerPanel)
+                sizes.append(answerPanel.frame.size)
+            }
+        }
+        guard !panels.isEmpty else { return }
+
+        let totalHeight = sizes.reduce(0) { $0 + $1.height }
+            + Metrics.gap * CGFloat(max(0, sizes.count - 1))
+        expansionDirection = WindowPlacement.preferredAttachmentDirection(
+            anchor: petPanel.frame,
+            in: visible,
+            requiredHeight: totalHeight,
+            gap: Metrics.gap
+        )
+        let frames = WindowPlacement.stackedFrames(
+            sizes: sizes,
+            attachedTo: petPanel.frame,
+            in: visible,
+            direction: expansionDirection,
+            gap: Metrics.gap
+        )
+
+        positioningPanels = true
+        for (panel, frame) in zip(panels, frames) {
+            panel.setFrame(frame, display: true, animate: animated)
+        }
+        positioningPanels = false
     }
 
     private func observeScreenChanges() {
@@ -327,13 +679,10 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
         ) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
-                if let compactPanel = self.compactPanel {
-                    self.ensureWindowIsOnScreen(compactPanel)
-                }
-                if let floatingButtonPanel = self.floatingButtonPanel {
-                    self.ensureWindowIsOnScreen(floatingButtonPanel)
-                    self.saveFrame(floatingButtonPanel.frame, key: Keys.floatingButtonFrame)
-                }
+                [self.petPanel, self.composerPanel, self.statusPanel, self.answerPanel]
+                    .compactMap { $0 }
+                    .forEach(self.ensureWindowIsOnScreen)
+                self.positionAttachedPanels()
             }
         }
     }
@@ -341,24 +690,37 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
     private func ensureWindowIsOnScreen(_ window: NSWindow) {
         let center = NSPoint(x: window.frame.midX, y: window.frame.midY)
         guard let visible = (screen(containing: center) ?? NSScreen.main)?.visibleFrame else { return }
-        let frame = WindowPlacement.clamped(window.frame, to: visible)
+        let bounds = window === petPanel ? visible.insetBy(dx: 10, dy: 10) : visible
+        let frame = WindowPlacement.clamped(window.frame, to: bounds)
         guard frame != window.frame else { return }
+        positioningPanels = true
         window.setFrame(frame, display: false)
+        positioningPanels = false
     }
 
     private func screen(containing point: NSPoint) -> NSScreen? {
         NSScreen.screens.first { NSMouseInRect(point, $0.frame, false) }
     }
 
-    private func defaultFloatingButtonFrame(size: NSSize) -> NSRect {
+    private func defaultPetFrame() -> NSRect {
         guard let visible = NSScreen.main?.visibleFrame else {
-            return NSRect(origin: .zero, size: size)
+            return NSRect(origin: .zero, size: Metrics.petSize)
         }
         return NSRect(
-            x: visible.maxX - size.width - 8,
-            y: visible.midY - size.height / 2,
-            width: size.width,
-            height: size.height
+            x: visible.maxX - Metrics.petSize.width - 28,
+            y: visible.midY - Metrics.petSize.height / 2,
+            width: Metrics.petSize.width,
+            height: Metrics.petSize.height
+        )
+    }
+
+    private func migratedPetFrame() -> NSRect? {
+        guard let legacy = restoredFrame(key: Keys.legacyFloatingButtonFrame) else { return nil }
+        return NSRect(
+            x: legacy.midX - Metrics.petSize.width / 2,
+            y: legacy.midY - Metrics.petSize.height / 2,
+            width: Metrics.petSize.width,
+            height: Metrics.petSize.height
         )
     }
 
