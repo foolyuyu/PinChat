@@ -1,0 +1,15 @@
+.build/
+.swiftpm/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+.DS_Store
+
+# Local release artifacts (source and documentation in Release remain tracked)
+Release/PinChat.app/
+Release/*.zip
+
+# Editor and temporary files
+.idea/
+*.swp
+*.tmp
