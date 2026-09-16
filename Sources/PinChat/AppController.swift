@@ -317,6 +317,9 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
         model.onTurnPresentationChanged = { [weak self] presentation in
             self?.presentConversationTurn(presentation)
         }
+        model.onApprovalRequested = { [weak self] in
+            self?.presentApprovalRequest()
+        }
     }
 
     func launch() {
@@ -532,6 +535,23 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
         }
     }
 
+    private func presentApprovalRequest() {
+        isComposerVisible = false
+        isStatusVisible = true
+        isAnswerVisible = true
+        statusContext = .conversation
+        answerAttachment = .attached
+        composerPanel?.orderOut(nil)
+        positionAttachedPanels()
+        statusPanel?.orderFrontRegardless()
+        if let answerPanel, !answerPanel.isVisible {
+            revealWithLift(answerPanel)
+        } else {
+            answerPanel?.orderFrontRegardless()
+        }
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
     func toggleAnswer() {
         guard !model.isGenerating, !model.latestAssistantText.isEmpty else { return }
         if isAnswerVisible {
@@ -567,6 +587,7 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
                 answerPanel?.orderFrontRegardless()
             }
         case .work:
+            guard model.pendingApproval == nil else { return }
             guard isAnswerVisible else { return }
             isAnswerVisible = false
             answerPanel?.orderOut(nil)
@@ -711,6 +732,13 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
         }
         settingsWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func openFullDiskAccessSettings() {
+        guard let url = URL(
+            string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
+        ) else { return }
+        NSWorkspace.shared.open(url)
     }
 
     func movePet(to pointerLocation: NSPoint) {

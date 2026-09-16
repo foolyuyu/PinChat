@@ -255,6 +255,7 @@ struct MiniComposerView: View {
 
             HStack(spacing: 7) {
                 attachmentMenu
+                permissionMenu
 
                 TextField(placeholder, text: $draft, axis: .vertical)
                     .textFieldStyle(.plain)
@@ -316,6 +317,31 @@ struct MiniComposerView: View {
             updateComposerHeight()
         }
         .onExitCommand { controller.hideComposer() }
+    }
+
+    private var permissionMenu: some View {
+        Menu {
+            ForEach(PinChatPermissionMode.allCases) { mode in
+                Button {
+                    model.permissionMode = mode
+                } label: {
+                    Label {
+                        Text(mode.title)
+                    } icon: {
+                        Image(systemName: model.permissionMode == mode
+                            ? "checkmark"
+                            : mode.systemImage)
+                    }
+                }
+            }
+        } label: {
+            composerLeadingIcon(systemName: model.permissionMode.systemImage)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("权限：\(model.permissionMode.title)")
+        .accessibilityLabel("Codex 权限：\(model.permissionMode.title)")
     }
 
     @ViewBuilder
@@ -729,6 +755,9 @@ struct TaskStatusCard: View {
 
     private var conversationDetail: String {
         if let error = model.lastTurnError { return error }
+        if let approval = model.pendingApproval {
+            return "等待批准：\(approval.title)"
+        }
         if model.isGenerating {
             return model.latestUserText.isEmpty ? "Codex 正在思考…" : model.latestUserText
         }
@@ -753,6 +782,10 @@ struct AnswerPanelView: View {
         VStack(spacing: 0) {
             answerToolbar
             Divider().opacity(0.45)
+            if let approval = model.pendingApproval {
+                ApprovalRequestCard(model: model, request: approval)
+                Divider().opacity(0.40)
+            }
             ConversationBody(model: model)
             Divider().opacity(0.40)
             followUpComposer
@@ -847,6 +880,71 @@ struct AnswerPanelView: View {
         guard !text.isEmpty, !model.isGenerating else { return }
         draft = ""
         controller.sendMessage(text)
+    }
+}
+
+private struct ApprovalRequestCard: View {
+    @ObservedObject var model: AppModel
+    let request: CodexApprovalRequest
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "hand.raised.fill")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.orange)
+                    .frame(width: 24, height: 24)
+                    .background(Color.orange.opacity(0.12), in: Circle())
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(request.title)
+                        .font(.system(size: 13.5, weight: .semibold))
+                    Text(request.detail)
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(4)
+                        .textSelection(.enabled)
+                    if let reason = request.reason,
+                       !reason.isEmpty,
+                       reason != request.detail {
+                        Text(reason)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+                    if let directory = request.workingDirectory, !directory.isEmpty {
+                        Text(directory)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .textSelection(.enabled)
+                    }
+                }
+            }
+
+            HStack(spacing: 8) {
+                Spacer()
+                Button("拒绝") {
+                    model.resolveApproval(request, decision: .decline)
+                }
+                .keyboardShortcut(.cancelAction)
+                Button("允许一次") {
+                    model.resolveApproval(request, decision: .allowOnce)
+                }
+                if request.canAllowForSession {
+                    Button("本次对话允许") {
+                        model.resolveApproval(request, decision: .allowForSession)
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            }
+            .controlSize(.small)
+        }
+        .padding(.horizontal, 17)
+        .padding(.vertical, 12)
+        .background(Color.orange.opacity(0.045))
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Codex 请求授权：\(request.title)")
     }
 }
 
@@ -1047,8 +1145,33 @@ struct SettingsView: View {
                     }
                 }
 
-                Section("PinChat 2.0") {
-                    Text("点击桌宠旁的铅笔提问；完成卡可展开回答、确认完成，或把同一任务交给 Codex 主应用继续。PinChat 不提供历史任务列表。语音、附件和其他 AI API 为未来候选项。")
+                Section("任务权限") {
+                    Picker("权限模式", selection: $model.permissionMode) {
+                        ForEach(PinChatPermissionMode.allCases) { mode in
+                            Label(mode.title, systemImage: mode.systemImage).tag(mode)
+                        }
+                    }
+                    Text(model.permissionMode.detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("权限表示 Codex 可以使用的能力上限；简单问答不会因此自动读取文件。新选择会在下一次发送或继续对话时生效。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if model.permissionMode == .fullAccess {
+                        Label(
+                            "完全访问会移除 Codex 沙箱边界，请只在你信任当前任务时使用。macOS 保护目录仍可能需要“完全磁盘访问权限”。",
+                            systemImage: "exclamationmark.triangle.fill"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                    }
+                    Button("打开完全磁盘访问设置…") {
+                        controller.openFullDiskAccessSettings()
+                    }
+                }
+
+                Section("PinChat 3.2") {
+                    Text("点击桌宠提问；完成卡可展开回答、确认完成，或把同一任务交给 Codex 主应用继续。PinChat 不提供历史任务列表，也不接入其他 AI API。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

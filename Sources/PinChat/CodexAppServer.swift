@@ -50,6 +50,9 @@ final class CodexAppServer: @unchecked Sendable {
     var onTurnCompleted: (@Sendable (_ threadID: String, _ error: String?) -> Void)?
     var onProcessStopped: (@Sendable (_ message: String) -> Void)?
     var onAppCapabilitiesUpdated: (@Sendable ([CodexComposerCapability]) -> Void)?
+    var onApprovalRequested: (@Sendable (CodexApprovalRequest) -> Void)?
+    var onApprovalResolved: (@Sendable (CodexServerRequestID) -> Void)?
+    var onApprovalsCleared: (@Sendable () -> Void)?
 
     let purpose: CodexAppServerPurpose
 
@@ -127,7 +130,7 @@ final class CodexAppServer: @unchecked Sendable {
                             "title": purpose == .conversation
                                 ? "PinChat"
                                 : "PinChat Activity Observer",
-                            "version": "0.2.5"
+                            "version": "0.3.2"
                         ]
                     ]
                 ) { result in
@@ -439,6 +442,7 @@ final class CodexAppServer: @unchecked Sendable {
         attachments: [ChatAttachment] = [],
         capabilities: [CodexComposerCapability] = [],
         workingDirectory: String,
+        permissionMode: PinChatPermissionMode,
         existingThreadID: String?,
         onThreadReady: @escaping @Sendable (String) -> Void,
         onTurnStarted: @escaping @Sendable (ActiveTurn) -> Void,
@@ -446,7 +450,8 @@ final class CodexAppServer: @unchecked Sendable {
     ) {
         prepareThread(
             existingThreadID: existingThreadID,
-            workingDirectory: workingDirectory
+            workingDirectory: workingDirectory,
+            permissionMode: permissionMode
         ) { [weak self] result in
             guard let self else { return }
             switch result {
@@ -534,6 +539,167 @@ final class CodexAppServer: @unchecked Sendable {
         return items
     }
 
+    func resolveApproval(
+        _ request: CodexApprovalRequest,
+        decision: CodexApprovalDecision,
+        completion: @escaping @Sendable (Result<Void, Error>) -> Void
+    ) {
+        queue.async { [weak self] in
+            guard let self, self.process?.isRunning == true, let input = self.input else {
+                completion(.failure(PinChatError.processStopped))
+                return
+            }
+            guard let result = Self.approvalResponse(for: request, decision: decision) else {
+                completion(.failure(PinChatError.invalidResponse))
+                return
+            }
+            let message: JSON = ["id": request.requestID.jsonValue, "result": result]
+            do {
+                var data = try JSONSerialization.data(withJSONObject: message)
+                data.append(0x0A)
+                try input.write(contentsOf: data)
+                completion(.success(()))
+            } catch {
+                completion(.failure(error))
+            }
+        }
+    }
+
+    static func approvalRequest(
+        method: String,
+        requestID: CodexServerRequestID,
+        params: JSON
+    ) -> CodexApprovalRequest? {
+        guard let threadID = params["threadId"] as? String,
+              let turnID = params["turnId"] as? String,
+              let itemID = params["itemId"] as? String else { return nil }
+
+        let reason = params["reason"] as? String
+        let cwd = params["cwd"] as? String
+
+        switch method {
+        case "item/commandExecution/requestApproval":
+            let command = params["command"] as? String
+            let kind = params["kind"] as? String
+            let decisions = params["availableDecisions"] as? [Any]
+            let canAllowForSession = decisions?.contains(where: {
+                ($0 as? String) == "acceptForSession"
+            }) ?? true
+            return CodexApprovalRequest(
+                requestID: requestID,
+                threadID: threadID,
+                turnID: turnID,
+                itemID: itemID,
+                kind: .commandExecution,
+                title: kind == "writeStdin" ? "向终端发送输入" : "运行工作区外操作",
+                detail: command ?? reason ?? "Codex 请求执行一项需要额外权限的操作。",
+                reason: reason,
+                workingDirectory: cwd,
+                requestedPermissionsData: nil,
+                canAllowForSession: canAllowForSession
+            )
+
+        case "item/fileChange/requestApproval":
+            let root = params["grantRoot"] as? String
+            return CodexApprovalRequest(
+                requestID: requestID,
+                threadID: threadID,
+                turnID: turnID,
+                itemID: itemID,
+                kind: .fileChange,
+                title: "修改工作区外文件",
+                detail: root.map { "允许写入：\($0)" }
+                    ?? reason
+                    ?? "Codex 请求修改当前工作区之外的文件。",
+                reason: reason,
+                workingDirectory: root ?? cwd,
+                requestedPermissionsData: nil,
+                canAllowForSession: true
+            )
+
+        case "item/permissions/requestApproval":
+            guard let permissions = params["permissions"] as? JSON,
+                  let data = try? JSONSerialization.data(withJSONObject: permissions) else {
+                return nil
+            }
+            return CodexApprovalRequest(
+                requestID: requestID,
+                threadID: threadID,
+                turnID: turnID,
+                itemID: itemID,
+                kind: .permissions,
+                title: "扩展访问权限",
+                detail: permissionSummary(permissions),
+                reason: reason,
+                workingDirectory: cwd,
+                requestedPermissionsData: data,
+                canAllowForSession: true
+            )
+
+        default:
+            return nil
+        }
+    }
+
+    static func approvalResponse(
+        for request: CodexApprovalRequest,
+        decision: CodexApprovalDecision
+    ) -> JSON? {
+        switch request.kind {
+        case .commandExecution, .fileChange:
+            let value: String
+            switch decision {
+            case .decline: value = "decline"
+            case .allowOnce: value = "accept"
+            case .allowForSession:
+                value = request.canAllowForSession ? "acceptForSession" : "accept"
+            }
+            return ["decision": value]
+
+        case .permissions:
+            let permissions: JSON
+            if decision == .decline {
+                permissions = [:]
+            } else if let data = request.requestedPermissionsData,
+                      let decoded = try? JSONSerialization.jsonObject(with: data) as? JSON {
+                permissions = decoded
+            } else {
+                return nil
+            }
+            return [
+                "permissions": permissions,
+                "scope": decision == .allowForSession ? "session" : "turn",
+                "strictAutoReview": false
+            ]
+        }
+    }
+
+    private static func permissionSummary(_ permissions: JSON) -> String {
+        var parts: [String] = []
+        if let fileSystem = permissions["fileSystem"] as? JSON {
+            let reads = fileSystem["read"] as? [String] ?? []
+            let writes = fileSystem["write"] as? [String] ?? []
+            if !reads.isEmpty { parts.append("读取：\(reads.joined(separator: "、"))") }
+            if !writes.isEmpty { parts.append("写入：\(writes.joined(separator: "、"))") }
+            if let entries = fileSystem["entries"] as? [JSON] {
+                let descriptions = entries.compactMap { entry -> String? in
+                    guard let access = entry["access"] as? String,
+                          let path = entry["path"] as? JSON else { return nil }
+                    if let value = path["path"] as? String { return "\(access)：\(value)" }
+                    if let value = path["pattern"] as? String { return "\(access)：\(value)" }
+                    if let value = path["value"] as? String { return "\(access)：\(value)" }
+                    return nil
+                }
+                parts.append(contentsOf: descriptions)
+            }
+        }
+        if let network = permissions["network"] as? JSON,
+           network["enabled"] as? Bool == true {
+            parts.append("访问网络")
+        }
+        return parts.isEmpty ? "Codex 请求临时扩大本轮任务的访问范围。" : parts.joined(separator: "\n")
+    }
+
     func interruptActiveTurn(completion: (@Sendable (Result<Void, Error>) -> Void)? = nil) {
         queue.async { [weak self] in
             guard let self, let turn = self.activeTurn else {
@@ -552,6 +718,7 @@ final class CodexAppServer: @unchecked Sendable {
     func releaseThreadForExternalClient(
         threadID: String,
         workingDirectory: String,
+        permissionMode: PinChatPermissionMode,
         completion: @escaping @Sendable (Result<Void, Error>) -> Void
     ) {
         // Older PinChat threads were created without a cwd. Resuming with the
@@ -561,7 +728,8 @@ final class CodexAppServer: @unchecked Sendable {
             method: "thread/resume",
             params: Self.threadResumeParameters(
                 threadID: threadID,
-                workingDirectory: workingDirectory
+                workingDirectory: workingDirectory,
+                permissionMode: permissionMode
             )
         ) { [weak self] resumeResult in
             guard let self else { return }
@@ -595,6 +763,7 @@ final class CodexAppServer: @unchecked Sendable {
     private func prepareThread(
         existingThreadID: String?,
         workingDirectory: String,
+        permissionMode: PinChatPermissionMode,
         completion: @escaping @Sendable (Result<String, Error>) -> Void
     ) {
         if let existingThreadID {
@@ -602,7 +771,8 @@ final class CodexAppServer: @unchecked Sendable {
                 method: "thread/resume",
                 params: Self.threadResumeParameters(
                     threadID: existingThreadID,
-                    workingDirectory: workingDirectory
+                    workingDirectory: workingDirectory,
+                    permissionMode: permissionMode
                 )
             ) { result in
                 completion(result.map { _ in existingThreadID })
@@ -612,7 +782,10 @@ final class CodexAppServer: @unchecked Sendable {
 
         sendRequest(
             method: "thread/start",
-            params: Self.threadStartParameters(workingDirectory: workingDirectory)
+            params: Self.threadStartParameters(
+                workingDirectory: workingDirectory,
+                permissionMode: permissionMode
+            )
         ) { result in
             switch result {
             case .failure(let error):
@@ -628,24 +801,30 @@ final class CodexAppServer: @unchecked Sendable {
         }
     }
 
-    static func threadStartParameters(workingDirectory: String) -> JSON {
+    static func threadStartParameters(
+        workingDirectory: String,
+        permissionMode: PinChatPermissionMode = .askForApproval
+    ) -> JSON {
         [
             "cwd": workingDirectory,
-            "approvalPolicy": "never",
-            "sandbox": "read-only",
+            "approvalPolicy": permissionMode.approvalPolicy,
+            "approvalsReviewer": permissionMode.approvalsReviewer,
+            "sandbox": permissionMode.sandboxMode,
             "ephemeral": false
         ]
     }
 
     static func threadResumeParameters(
         threadID: String,
-        workingDirectory: String
+        workingDirectory: String,
+        permissionMode: PinChatPermissionMode = .askForApproval
     ) -> JSON {
         [
             "threadId": threadID,
             "cwd": workingDirectory,
-            "approvalPolicy": "never",
-            "sandbox": "read-only",
+            "approvalPolicy": permissionMode.approvalPolicy,
+            "approvalsReviewer": permissionMode.approvalsReviewer,
+            "sandbox": permissionMode.sandboxMode,
             "excludeTurns": true
         ]
     }
@@ -809,7 +988,9 @@ final class CodexAppServer: @unchecked Sendable {
     }
 
     private func handleMessage(_ message: JSON) {
-        if let id = message["id"] as? Int, let completion = pending.removeValue(forKey: id) {
+        if message["method"] == nil,
+           let id = (message["id"] as? Int) ?? (message["id"] as? NSNumber)?.intValue,
+           let completion = pending.removeValue(forKey: id) {
             if let error = message["error"] as? JSON {
                 let text = error["message"] as? String ?? "ChatGPT 服务请求失败"
                 completion(.failure(PinChatError.server(text)))
@@ -829,6 +1010,17 @@ final class CodexAppServer: @unchecked Sendable {
             onWorkActivity?(threadID, method)
         }
 
+        if let rawID = message["id"],
+           let requestID = CodexServerRequestID(jsonValue: rawID),
+           let request = Self.approvalRequest(
+               method: method,
+               requestID: requestID,
+               params: params
+           ) {
+            onApprovalRequested?(request)
+            return
+        }
+
         switch method {
         case "account/login/completed":
             let success = params["success"] as? Bool ?? false
@@ -844,6 +1036,11 @@ final class CodexAppServer: @unchecked Sendable {
         case "app/list/updated":
             let apps = Self.appCapabilities(from: params)
             if !apps.isEmpty { onAppCapabilitiesUpdated?(apps) }
+        case "serverRequest/resolved":
+            if let rawID = params["requestId"],
+               let requestID = CodexServerRequestID(jsonValue: rawID) {
+                onApprovalResolved?(requestID)
+            }
         case "item/started":
             guard let threadID = params["threadId"] as? String,
                   let item = params["item"] as? JSON,
@@ -917,6 +1114,7 @@ final class CodexAppServer: @unchecked Sendable {
         activeTurn = nil
         agentMessagePhases.removeAll()
         callbacks.forEach { $0(.failure(PinChatError.server(message))) }
+        onApprovalsCleared?()
         onProcessStopped?(message)
     }
 
@@ -926,6 +1124,7 @@ final class CodexAppServer: @unchecked Sendable {
             isInitialized = false
             activeTurn = nil
             agentMessagePhases.removeAll()
+            onApprovalsCleared?()
             return
         }
         process.terminationHandler = nil
@@ -944,6 +1143,7 @@ final class CodexAppServer: @unchecked Sendable {
         activeTurn = nil
         agentMessagePhases.removeAll()
         callbacks.forEach { $0(.failure(PinChatError.processStopped)) }
+        onApprovalsCleared?()
     }
 
     static func shouldDisplayAgentMessage(phase: String?) -> Bool {

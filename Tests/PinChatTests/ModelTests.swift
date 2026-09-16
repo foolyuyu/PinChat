@@ -776,3 +776,108 @@ import Testing
     #expect(merged[0].sourceID == "answer-1")
     #expect(merged[0].text == "正在生成并已经完成")
 }
+
+@Test func permissionModesMatchOfficialCodexPermissionSemantics() {
+    #expect(PinChatPermissionMode.askForApproval.approvalPolicy == "on-request")
+    #expect(PinChatPermissionMode.askForApproval.approvalsReviewer == "user")
+    #expect(PinChatPermissionMode.askForApproval.sandboxMode == "workspace-write")
+
+    #expect(PinChatPermissionMode.approveForMe.approvalPolicy == "on-request")
+    #expect(PinChatPermissionMode.approveForMe.approvalsReviewer == "auto_review")
+    #expect(PinChatPermissionMode.approveForMe.sandboxMode == "workspace-write")
+
+    #expect(PinChatPermissionMode.fullAccess.approvalPolicy == "never")
+    #expect(PinChatPermissionMode.fullAccess.sandboxMode == "danger-full-access")
+}
+
+@Test func appServerThreadsReceiveTheSelectedPermissionMode() {
+    let start = CodexAppServer.threadStartParameters(
+        workingDirectory: "/tmp/workspace",
+        permissionMode: .approveForMe
+    )
+    #expect(start["approvalPolicy"] as? String == "on-request")
+    #expect(start["approvalsReviewer"] as? String == "auto_review")
+    #expect(start["sandbox"] as? String == "workspace-write")
+
+    let resume = CodexAppServer.threadResumeParameters(
+        threadID: "thread-1",
+        workingDirectory: "/tmp/workspace",
+        permissionMode: .fullAccess
+    )
+    #expect(resume["threadId"] as? String == "thread-1")
+    #expect(resume["approvalPolicy"] as? String == "never")
+    #expect(resume["sandbox"] as? String == "danger-full-access")
+}
+
+@Test func commandApprovalSupportsOnceSessionAndDeclineDecisions() throws {
+    let request = try #require(CodexAppServer.approvalRequest(
+        method: "item/commandExecution/requestApproval",
+        requestID: .string("approval-1"),
+        params: [
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "itemId": "item-1",
+            "kind": "command",
+            "command": "du -sh ~/Downloads",
+            "cwd": "/Users/example",
+            "reason": "需要检查下载目录",
+            "availableDecisions": ["accept", "acceptForSession", "decline"]
+        ]
+    ))
+    #expect(request.kind == .commandExecution)
+    #expect(request.canAllowForSession)
+    #expect(request.detail == "du -sh ~/Downloads")
+
+    #expect(CodexAppServer.approvalResponse(
+        for: request,
+        decision: .allowOnce
+    )?["decision"] as? String == "accept")
+    #expect(CodexAppServer.approvalResponse(
+        for: request,
+        decision: .allowForSession
+    )?["decision"] as? String == "acceptForSession")
+    #expect(CodexAppServer.approvalResponse(
+        for: request,
+        decision: .decline
+    )?["decision"] as? String == "decline")
+}
+
+@Test func permissionApprovalReturnsOnlyTheExplicitlyRequestedScope() throws {
+    let request = try #require(CodexAppServer.approvalRequest(
+        method: "item/permissions/requestApproval",
+        requestID: .number(42),
+        params: [
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "itemId": "item-1",
+            "cwd": "/tmp/workspace",
+            "reason": "读取资料并访问网络",
+            "permissions": [
+                "fileSystem": [
+                    "read": ["/Users/example/Documents"],
+                    "write": NSNull()
+                ],
+                "network": ["enabled": true]
+            ]
+        ]
+    ))
+    #expect(request.kind == .permissions)
+    #expect(request.detail.contains("/Users/example/Documents"))
+    #expect(request.detail.contains("访问网络"))
+
+    let granted = try #require(CodexAppServer.approvalResponse(
+        for: request,
+        decision: .allowForSession
+    ))
+    #expect(granted["scope"] as? String == "session")
+    let grantedPermissions = try #require(granted["permissions"] as? [String: Any])
+    #expect(grantedPermissions["fileSystem"] != nil)
+    #expect(grantedPermissions["network"] != nil)
+
+    let declined = try #require(CodexAppServer.approvalResponse(
+        for: request,
+        decision: .decline
+    ))
+    #expect(declined["scope"] as? String == "turn")
+    #expect((declined["permissions"] as? [String: Any])?.isEmpty == true)
+}

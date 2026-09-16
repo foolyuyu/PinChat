@@ -1,4 +1,4 @@
-# PinChat 3.1 桌宠输入互动版
+# PinChat 3.2 官方式权限版
 
 PinChat 是一个 macOS 原生 Codex 桌宠伴随组件，不是另一套聊天主应用。它通过本机 Codex App Server 和官方 ChatGPT 登录使用用户的 Free、Plus、Pro 或工作区额度，不需要 API Key，并继承本机 Codex 的默认模型、推理强度和人格。
 
@@ -10,6 +10,8 @@ PinChat 是一个 macOS 原生 Codex 桌宠伴随组件，不是另一套聊天�
 - 桌宠按官方实机参考保持约 52 pt，透明承载区进一步缩至 64×64 pt，不再保留下方铅笔入口
 - 点击桌宠本体直接展开横向输入条；再次点击桌宠、按 `Esc` 或再次使用快捷键均可收起
 - 输入条 `+` 支持添加多个文件/文件夹、照片和交互式截屏；附件可在发送前单独移除
+- 输入条内置权限入口，可切换“询问批准 / 自动批准 / 完全访问”；权限只是能力上限，简单问答不会因此自动读取文件
+- 越界命令、工作区外文件修改和权限扩展会自动展开小窗，显示真实命令、原因与路径，并支持拒绝、允许一次或本次对话允许
 - `+` 还会读取本机 Codex 的真实技能与已连接应用，选择后通过官方 `skill` / `mention` 输入项调用
 - 图片作为 Codex 原生本地图片输入发送，普通文件和文件夹作为用户选择的只读本机路径上下文发送
 - 输入框与状态卡取消外围透明承载边并使用不透底系统表面，不再透出下方页面文字
@@ -41,7 +43,7 @@ PinChat 会依次查找：
 
 桌面任务摘要通过独立活动观察通道的只读 `thread/list` 索引以及对应本机任务记录中的 `task_started`、`task_complete`、`turn_aborted` 事件生成；它不会向模型额外发问，也不会订阅、接管或修改 Codex 桌面端任务。
 
-PinChat 不读取浏览器 Cookie，不保存密码或 API Key。官方 OAuth 凭据和额度均由本机 Codex 管理。PinChat 的快速提问使用只读沙箱和 `never` 审批；需要工具执行、文件修改或审批的工作应交接到 Codex 主应用。
+PinChat 不读取浏览器 Cookie，不保存密码或 API Key。官方 OAuth 凭据和额度均由本机 Codex 管理。默认权限为“询问批准”：任务可在 PinChat 专用工作区内读写，越界时由小窗向用户申请。也可选择由 Codex 自动审查符合条件的请求，或明确启用完全访问。完全访问不会强制模型调用文件工具，且仍不能绕过 macOS 的隐私保护。
 
 ## 桌宠素材
 
@@ -86,6 +88,7 @@ swift test
 - PinChat 不修改 Codex 官方桌宠或 Codex 设置。若同时启用两个桌宠，可由用户在 Codex 设置中隐藏官方桌宠。
 - 普通全屏 Space 可置顶；锁屏、登录界面、系统安全窗口和受保护 DRM 画面无法被第三方应用覆盖。
 - 当前构建未公证。如 macOS 阻止首次打开，请在 Finder 中按住 Control 点击应用并选择“打开”。
+- 读取邮件、信息、浏览器数据及部分系统目录仍受 macOS TCC 管理；如任务确实需要，可在 PinChat 设置中打开“完全磁盘访问权限”页面并由用户手动授权。
 
 ## 2.1 官方桌宠参考记录
 
@@ -115,9 +118,14 @@ v3.0 根据本机 Codex App Server 的实际事件自动选择展示方式。只
 
 v3.1 对齐官方桌宠的 16 向注视反馈：输入条或可继续追问的回答窗口获得键入焦点时，按文字插入光标相对桌宠中心的方向切换官方绘制姿态；光标随输入、换行或选区移动后同步调整，失焦或收起输入界面后回到基础动画。PinChat 从本机 ChatGPT 应用只读提取方向图集并缓存，不把官方二进制素材提交到仓库；素材不可用时自动回退旧图集。冻结验收标准见 `Release/PET_INTERACTION_REQUIREMENTS_BASELINE_v3.1.md`。
 
+## 3.2 官方式权限与审批
+
+v3.2 不再把 PinChat 任务固定为只读。输入条与设置页提供“询问批准”“自动批准”“完全访问”三档，分别映射到 Codex 官方的工作区沙箱、审批 reviewer 与全访问配置。命令执行、工作区外文件修改和 `request_permissions` 权限扩展会在回答小窗显示原始请求范围，并按官方 App Server 协议回传拒绝、单次允许或会话允许；失效请求会自动移除。冻结验收标准见 `Release/PERMISSIONS_REQUIREMENTS_BASELINE_v3.2.md`。
+
 ## 官方能力依据
 
 - [Codex App Server](https://learn.chatgpt.com/docs/app-server)
 - [Codex Authentication](https://learn.chatgpt.com/docs/auth)
 - [Codex Pricing](https://learn.chatgpt.com/docs/pricing)
 - [Codex Pets](https://learn.chatgpt.com/docs/pets)
+- [Codex Sandbox](https://learn.chatgpt.com/docs/sandboxing)

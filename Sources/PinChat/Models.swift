@@ -22,6 +22,121 @@ enum PinChatConversationWorkspace {
     }
 }
 
+enum PinChatPermissionMode: String, CaseIterable, Identifiable, Sendable {
+    case askForApproval
+    case approveForMe
+    case fullAccess
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .askForApproval: return "询问批准"
+        case .approveForMe: return "自动批准"
+        case .fullAccess: return "完全访问"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .askForApproval:
+            return "可在工作区内读写；越界操作会先询问你。"
+        case .approveForMe:
+            return "可在工作区内读写；符合条件的越界请求由 Codex 自动审查。"
+        case .fullAccess:
+            return "不使用 Codex 文件与网络沙箱，也不会显示普通越界审批。"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .askForApproval: return "hand.raised"
+        case .approveForMe: return "checkmark.shield"
+        case .fullAccess: return "lock.open"
+        }
+    }
+
+    var approvalPolicy: String {
+        switch self {
+        case .askForApproval, .approveForMe: return "on-request"
+        case .fullAccess: return "never"
+        }
+    }
+
+    var approvalsReviewer: String {
+        switch self {
+        case .approveForMe: return "auto_review"
+        case .askForApproval, .fullAccess: return "user"
+        }
+    }
+
+    var sandboxMode: String {
+        switch self {
+        case .askForApproval, .approveForMe: return "workspace-write"
+        case .fullAccess: return "danger-full-access"
+        }
+    }
+}
+
+enum CodexServerRequestID: Hashable, Sendable {
+    case number(Int)
+    case string(String)
+
+    init?(jsonValue: Any) {
+        if let value = jsonValue as? Int {
+            self = .number(value)
+        } else if let value = jsonValue as? NSNumber {
+            self = .number(value.intValue)
+        } else if let value = jsonValue as? String {
+            self = .string(value)
+        } else {
+            return nil
+        }
+    }
+
+    var jsonValue: Any {
+        switch self {
+        case .number(let value): return value
+        case .string(let value): return value
+        }
+    }
+
+    var stableValue: String {
+        switch self {
+        case .number(let value): return "number:\(value)"
+        case .string(let value): return "string:\(value)"
+        }
+    }
+}
+
+enum CodexApprovalKind: String, Equatable, Sendable {
+    case commandExecution
+    case fileChange
+    case permissions
+}
+
+enum CodexApprovalDecision: Equatable, Sendable {
+    case decline
+    case allowOnce
+    case allowForSession
+}
+
+struct CodexApprovalRequest: Identifiable, Equatable, Sendable {
+    var requestID: CodexServerRequestID
+    var threadID: String
+    var turnID: String
+    var itemID: String
+    var kind: CodexApprovalKind
+    var title: String
+    var detail: String
+    var reason: String?
+    var workingDirectory: String?
+    var requestedPermissionsData: Data?
+    var canAllowForSession: Bool
+
+    var id: String { requestID.stableValue }
+}
+
 enum ChatRole: String, Codable, Sendable {
     case user
     case assistant

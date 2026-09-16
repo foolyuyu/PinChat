@@ -63,6 +63,7 @@ struct CodexExternalHandoffLifecycle: Equatable, Sendable {
 final class AppModel: ObservableObject {
     private static let viewedDesktopReceiptIDsKey = "viewedDesktopReceiptIDsV1"
     private static let trackedDesktopThreadIDsKey = "trackedDesktopThreadIDsV1"
+    private static let permissionModeKey = "pinChatPermissionModeV1"
     private static let maximumRememberedDesktopReceipts = 200
 
     @Published private(set) var sessions: [ChatSession]
@@ -78,8 +79,15 @@ final class AppModel: ObservableObject {
     @Published private(set) var isLoadingComposerCapabilities = false
     @Published private(set) var composerCapabilitiesError: String?
     @Published var alertMessage: String?
+    @Published var permissionMode: PinChatPermissionMode {
+        didSet {
+            UserDefaults.standard.set(permissionMode.rawValue, forKey: Self.permissionModeKey)
+        }
+    }
+    @Published private(set) var approvalRequests: [CodexApprovalRequest] = []
 
     var onTurnPresentationChanged: (@MainActor @Sendable (ConversationTurnPresentation) -> Void)?
+    var onApprovalRequested: (@MainActor @Sendable () -> Void)?
 
     private let chatService: CodexAppServer
     private let activityService: CodexAppServer
@@ -103,6 +111,7 @@ final class AppModel: ObservableObject {
     }
 
     var desktopActivity: CodexTaskActivity? { desktopActivities.first }
+    var pendingApproval: CodexApprovalRequest? { approvalRequests.first }
 
     var latestUserText: String {
         selectedSession?.messages.last(where: { $0.role == .user })?.text ?? ""
@@ -133,6 +142,9 @@ final class AppModel: ObservableObject {
         self.store = store
         self.conversationWorkingDirectory = conversationWorkingDirectory
             ?? PinChatConversationWorkspace.prepare()
+        permissionMode = UserDefaults.standard.string(forKey: Self.permissionModeKey)
+            .flatMap(PinChatPermissionMode.init(rawValue:))
+            ?? .askForApproval
         let storedReceiptIDs = UserDefaults.standard.stringArray(
             forKey: Self.viewedDesktopReceiptIDsKey
         ) ?? []
@@ -172,6 +184,17 @@ final class AppModel: ObservableObject {
         chatService.onWorkActivity = { [weak self] threadID, _ in
             Task { @MainActor in self?.observeWorkActivity(threadID: threadID) }
         }
+        chatService.onApprovalRequested = { [weak self] request in
+            Task { @MainActor in self?.receiveApprovalRequest(request) }
+        }
+        chatService.onApprovalResolved = { [weak self] requestID in
+            Task { @MainActor in
+                self?.approvalRequests.removeAll { $0.requestID == requestID }
+            }
+        }
+        chatService.onApprovalsCleared = { [weak self] in
+            Task { @MainActor in self?.approvalRequests.removeAll() }
+        }
         chatService.onTurnCompleted = { [weak self] threadID, error in
             Task { @MainActor in self?.finishTurn(threadID: threadID, error: error) }
         }
@@ -179,6 +202,7 @@ final class AppModel: ObservableObject {
             Task { @MainActor in
                 self?.connectionStatus = .unavailable("本地服务已停止")
                 self?.isGenerating = false
+                self?.approvalRequests.removeAll()
                 self?.lastTurnError = message
                 self?.alertMessage = message
             }
@@ -356,6 +380,7 @@ final class AppModel: ObservableObject {
             attachments: attachments,
             capabilities: capabilities,
             workingDirectory: conversationWorkingDirectory,
+            permissionMode: permissionMode,
             existingThreadID: existingThreadID,
             onThreadReady: { [weak self] threadID in
                 Task { @MainActor in self?.attach(threadID: threadID, to: sessionID) }
@@ -374,6 +399,24 @@ final class AppModel: ObservableObject {
         chatService.interruptActiveTurn { [weak self] result in
             if case .failure(let error) = result {
                 Task { @MainActor in self?.alertMessage = error.localizedDescription }
+            }
+        }
+    }
+
+    func resolveApproval(
+        _ request: CodexApprovalRequest,
+        decision: CodexApprovalDecision
+    ) {
+        guard approvalRequests.contains(where: { $0.id == request.id }) else { return }
+        chatService.resolveApproval(request, decision: decision) { [weak self] result in
+            Task { @MainActor in
+                guard let self else { return }
+                switch result {
+                case .success:
+                    self.approvalRequests.removeAll { $0.id == request.id }
+                case .failure(let error):
+                    self.alertMessage = error.localizedDescription
+                }
             }
         }
     }
@@ -447,7 +490,8 @@ final class AppModel: ObservableObject {
         connectionStatus = .starting
         chatService.releaseThreadForExternalClient(
             threadID: threadID,
-            workingDirectory: conversationWorkingDirectory
+            workingDirectory: conversationWorkingDirectory,
+            permissionMode: permissionMode
         ) { [weak self] result in
             Task { @MainActor in
                 guard let self else { return }
@@ -610,6 +654,12 @@ final class AppModel: ObservableObject {
         observeTurnEvent(.workActivity)
     }
 
+    private func receiveApprovalRequest(_ request: CodexApprovalRequest) {
+        guard !approvalRequests.contains(where: { $0.id == request.id }) else { return }
+        approvalRequests.append(request)
+        onApprovalRequested?()
+    }
+
     private func observeTurnEvent(_ event: ConversationTurnPresentation.Event) {
         setTurnPresentation(turnPresentation.observing(event))
     }
@@ -626,6 +676,7 @@ final class AppModel: ObservableObject {
               sessions[index].codexThreadID == threadID else { return }
 
         isGenerating = false
+        approvalRequests.removeAll { $0.threadID == threadID }
         activeSessionID = nil
         activeAssistantMessageID = nil
         if let error {
@@ -644,6 +695,7 @@ final class AppModel: ObservableObject {
             removeEmptyAssistantMessage(in: index)
         }
         isGenerating = false
+        approvalRequests.removeAll()
         activeSessionID = nil
         activeAssistantMessageID = nil
         lastTurnError = message
