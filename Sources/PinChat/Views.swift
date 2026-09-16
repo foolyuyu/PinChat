@@ -102,6 +102,99 @@ private extension View {
     }
 }
 
+private struct CaretScreenPositionReader: NSViewRepresentable {
+    let onChange: (CGPoint?) -> Void
+
+    func makeNSView(context: Context) -> CaretObserverView {
+        let view = CaretObserverView()
+        view.onChange = onChange
+        return view
+    }
+
+    func updateNSView(_ view: CaretObserverView, context: Context) {
+        view.onChange = onChange
+    }
+
+    static func dismantleNSView(_ view: CaretObserverView, coordinator: Void) {
+        view.stopObserving()
+        view.report(nil)
+    }
+}
+
+private final class CaretObserverView: NSView {
+    var onChange: ((CGPoint?) -> Void)?
+    private var timer: Timer?
+    private var lastPoint: CGPoint?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil {
+            stopObserving()
+            report(nil)
+        } else {
+            startObserving()
+        }
+    }
+
+    func stopObserving() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    func report(_ point: CGPoint?) {
+        guard point != lastPoint else { return }
+        lastPoint = point
+        onChange?(point)
+    }
+
+    private func startObserving() {
+        guard timer == nil else { return }
+        let interval = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            ? 0.10
+            : 1.0 / 30.0
+        let timer = Timer(
+            timeInterval: interval,
+            target: self,
+            selector: #selector(sampleCaret),
+            userInfo: nil,
+            repeats: true
+        )
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+        sampleCaret()
+    }
+
+    @objc private func sampleCaret() {
+        guard let window,
+              window.isVisible,
+              window.isKeyWindow,
+              let editor = activeTextEditor(in: window) else {
+            report(nil)
+            return
+        }
+        let selection = editor.selectedRange()
+        let rect = editor.firstRect(
+            forCharacterRange: NSRange(location: selection.location, length: 0),
+            actualRange: nil
+        )
+        guard rect.height > 0,
+              rect.midX.isFinite,
+              rect.midY.isFinite else {
+            report(nil)
+            return
+        }
+        report(CGPoint(x: rect.midX, y: rect.midY))
+    }
+
+    private func activeTextEditor(in window: NSWindow) -> NSTextView? {
+        if let editor = window.firstResponder as? NSTextView { return editor }
+        if let field = window.firstResponder as? NSTextField {
+            return field.currentEditor() as? NSTextView
+        }
+        return nil
+    }
+}
+
 struct PetRootView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var controller: AppController
@@ -117,7 +210,13 @@ struct PetRootView: View {
     }
 
     var body: some View {
-        PetSpriteView(store: controller.spriteStore, animation: animation)
+        PetSpriteView(
+            store: controller.spriteStore,
+            animation: animation,
+            lookDirection: animation.allowsDirectionalPose
+                ? controller.petLookDirection
+                : nil
+        )
             .frame(
                 width: PinChatVisualMetrics.petArtworkSize.width,
                 height: PinChatVisualMetrics.petArtworkSize.height
@@ -164,6 +263,14 @@ struct MiniComposerView: View {
                     .focused($focused)
                     .disabled(!model.canSend || model.isGenerating)
                     .onSubmit(send)
+                    .background {
+                        CaretScreenPositionReader { point in
+                            controller.updatePetCaret(
+                                screenPoint: point,
+                                context: .composer
+                            )
+                        }
+                    }
 
                 if model.account == nil {
                     Button("登录") { model.signIn() }
@@ -701,6 +808,14 @@ struct AnswerPanelView: View {
                 .lineLimit(1...4)
                 .focused($focused)
                 .onSubmit(send)
+                .background {
+                    CaretScreenPositionReader { point in
+                        controller.updatePetCaret(
+                            screenPoint: point,
+                            context: .answer
+                        )
+                    }
+                }
             if model.isGenerating {
                 ActionCircleButton(
                     systemName: "stop.fill",

@@ -1,10 +1,12 @@
-# PinChat 3.0 智能对话与任务展示版
+# PinChat 3.1 桌宠输入互动版
 
 PinChat 是一个 macOS 原生 Codex 桌宠伴随组件，不是另一套聊天主应用。它通过本机 Codex App Server 和官方 ChatGPT 登录使用用户的 Free、Plus、Pro 或工作区额度，不需要 API Key，并继承本机 Codex 的默认模型、推理强度和人格。
 
 ## 核心体验
 
 - 高保真蓝色 Codex 桌宠，支持待机、工作、完成、失败和拖动动画，并过滤图集中的透明空帧
+- 输入条或回答窗口中出现键入光标时，桌宠使用官方 16 向姿态看向文字插入点；文字增长、换行或移动插入点时同步调整
+- 输入框失焦或关闭后恢复基础姿态；拖动、失败等明确状态仍优先显示自身动画，“减少动态效果”开启时自动降低采样频率
 - 桌宠按官方实机参考保持约 52 pt，透明承载区进一步缩至 64×64 pt，不再保留下方铅笔入口
 - 点击桌宠本体直接展开横向输入条；再次点击桌宠、按 `Esc` 或再次使用快捷键均可收起
 - 输入条 `+` 支持添加多个文件/文件夹、照片和交互式截屏；附件可在发送前单独移除
@@ -45,12 +47,14 @@ PinChat 不读取浏览器 Cookie，不保存密码或 API Key。官方 OAuth �
 
 PinChat 不在仓库中打包官方桌宠二进制素材。运行时会按以下顺序加载：
 
-1. Codex CLI 缓存：`~/.codex/cache/tui-pets/v1/assets/codex-spritesheet-v4.webp`
-2. PinChat 缓存：`~/Library/Caches/PinChat/Pets/codex-spritesheet-v4.webp`
-3. OpenAI 官方静态资源：`https://persistent.oaistatic.com/codex/pets/v1/codex-spritesheet-v4.webp`
-4. 离线时使用内置的 Codex 风格矢量后备形象
+1. PinChat 方向图集缓存：`~/Library/Caches/PinChat/Pets/codex-spritesheet-directional.webp`
+2. 只读本机 ChatGPT 应用的 `app.asar`，动态查找最新官方 Codex 方向图集并写入上述缓存
+3. Codex CLI 旧图集缓存：`~/.codex/cache/tui-pets/v1/assets/codex-spritesheet-v4.webp`
+4. PinChat 旧图集缓存：`~/Library/Caches/PinChat/Pets/codex-spritesheet-v4.webp`
+5. OpenAI 官方旧版静态资源：`https://persistent.oaistatic.com/codex/pets/v1/codex-spritesheet-v4.webp`
+6. 离线时使用内置的 Codex 风格矢量后备形象
 
-官方图集为 1536×1872、8×9 帧；PinChat 会校验尺寸后再使用。
+当前方向图集为 1536×2288、8×11 帧；最后两行按正上方起每 22.5° 提供一个方向，共 16 向。旧版 1536×1872、8×9 图集仍可用于基础动画，PinChat 会校验尺寸后再使用。
 
 ## 构建与验证
 
@@ -106,6 +110,10 @@ v2.5 将桌宠悬停摘要从单个最近任务升级为最多 5 项的动态列
 ## 3.0 智能对话与任务展示
 
 v3.0 根据本机 Codex App Server 的实际事件自动选择展示方式。只有正式回答且没有执行动作的请求会自动展开回答窗口；命令、文件变更、工具调用、网页检索、图片查看、子任务和审批请求保持进度卡。工作模式在本轮内锁定，手动展开最终回答和连续追问继续可用。冻结验收标准见 `Release/INTELLIGENT_PRESENTATION_REQUIREMENTS_BASELINE_v3.0.md`。
+
+## 3.1 桌宠输入互动
+
+v3.1 对齐官方桌宠的 16 向注视反馈：输入条或可继续追问的回答窗口获得键入焦点时，按文字插入光标相对桌宠中心的方向切换官方绘制姿态；光标随输入、换行或选区移动后同步调整，失焦或收起输入界面后回到基础动画。PinChat 从本机 ChatGPT 应用只读提取方向图集并缓存，不把官方二进制素材提交到仓库；素材不可用时自动回退旧图集。冻结验收标准见 `Release/PET_INTERACTION_REQUIREMENTS_BASELINE_v3.1.md`。
 
 ## 官方能力依据
 

@@ -599,6 +599,74 @@ import Testing
     #expect(PetAnimation.resolve(isDragging: false, isGenerating: false, hasError: false, hasAnswer: false) == .idle)
 }
 
+@Test func petLookDirectionMatchesOfficialSixteenWayCompass() throws {
+    let center = CGPoint(x: 200, y: 200)
+    let samples: [(angle: Double, index: Int)] = [
+        (0, 0),
+        (22.5, 1),
+        (45, 2),
+        (90, 4),
+        (180, 8),
+        (270, 12),
+        (337.5, 15),
+        (359, 0)
+    ]
+
+    for sample in samples {
+        let radians = sample.angle * .pi / 180
+        let caretPosition = CGPoint(
+            x: center.x + CGFloat(sin(radians) * 100),
+            y: center.y + CGFloat(cos(radians) * 100)
+        )
+        let direction = try #require(PetLookDirection.resolve(
+            mascotCenter: center,
+            target: caretPosition
+        ))
+        #expect(direction.index == sample.index)
+    }
+}
+
+@Test func petLookDirectionUsesIdleInsideCenterDeadZone() {
+    let center = CGPoint(x: 100, y: 100)
+    #expect(PetLookDirection.resolve(mascotCenter: center, target: center) == nil)
+    #expect(PetLookDirection.resolve(
+        mascotCenter: center,
+        target: CGPoint(x: 100.5, y: 100.5)
+    ) == nil)
+    #expect(PetLookDirection.resolve(
+        mascotCenter: center,
+        target: CGPoint(x: 100, y: 102)
+    ) == PetLookDirection(index: 0))
+}
+
+@Test func petLookFramesMapToTheTwoOfficialRows() {
+    #expect(PetLookDirection(index: 0).columnIndex == 0)
+    #expect(PetLookDirection(index: 0).rowIndex == 9)
+    #expect(PetLookDirection(index: 7).columnIndex == 7)
+    #expect(PetLookDirection(index: 7).rowIndex == 9)
+    #expect(PetLookDirection(index: 8).columnIndex == 0)
+    #expect(PetLookDirection(index: 8).rowIndex == 10)
+    #expect(PetLookDirection(index: 15).columnIndex == 7)
+    #expect(PetLookDirection(index: 15).rowIndex == 10)
+}
+
+@Test func petSpriteLayoutsKeepBasicAssetCompatibility() {
+    #expect(PetSpriteSheetLayout.detect(width: 1536, height: 1872) == .basic)
+    #expect(PetSpriteSheetLayout.detect(width: 1536, height: 2288) == .directional)
+    #expect(PetSpriteSheetLayout.detect(width: 1024, height: 2288) == nil)
+    #expect(PetSpriteSheetLayout.detect(width: 1536, height: 2048) == nil)
+}
+
+@Test func transientPetAnimationsOverrideCursorFacing() {
+    #expect(PetAnimation.idle.allowsDirectionalPose)
+    #expect(PetAnimation.working.allowsDirectionalPose)
+    #expect(PetAnimation.waving.allowsDirectionalPose)
+    #expect(!PetAnimation.jumping.allowsDirectionalPose)
+    #expect(!PetAnimation.failed.allowsDirectionalPose)
+    #expect(!PetAnimation.runningLeft.allowsDirectionalPose)
+    #expect(!PetAnimation.runningRight.allowsDirectionalPose)
+}
+
 @Test func transparentSpriteCellsAreFilteredOut() throws {
     let colorSpace = CGColorSpaceCreateDeviceRGB()
     let blankContext = try #require(CGContext(

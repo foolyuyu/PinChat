@@ -21,6 +21,11 @@ enum TaskStatusContext: Equatable, Sendable {
     case desktopActivity
 }
 
+enum PetCaretContext: Equatable, Sendable {
+    case composer
+    case answer
+}
+
 enum ConversationSendPresentation: Equatable, Sendable {
     case statusOnly
     case expandedConversation
@@ -232,12 +237,32 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
         didSet {
             defaults.set(floatingButtonEnabled, forKey: Keys.floatingButtonEnabled)
             updatePetVisibility()
+            refreshPetLookDirection()
         }
     }
-    @Published private(set) var isComposerVisible = false
+    @Published private(set) var isComposerVisible = false {
+        didSet {
+            if !isComposerVisible, activePetCaretContext == .composer {
+                activePetCaretContext = nil
+                activePetCaretScreenPoint = nil
+            }
+            refreshPetLookDirection()
+        }
+    }
     @Published private(set) var isStatusVisible = false
-    @Published private(set) var isAnswerVisible = false
-    @Published private(set) var isDraggingPet = false
+    @Published private(set) var isAnswerVisible = false {
+        didSet {
+            if !isAnswerVisible, activePetCaretContext == .answer {
+                activePetCaretContext = nil
+                activePetCaretScreenPoint = nil
+            }
+            refreshPetLookDirection()
+        }
+    }
+    @Published private(set) var isDraggingPet = false {
+        didSet { refreshPetLookDirection() }
+    }
+    @Published private(set) var petLookDirection: PetLookDirection?
     @Published private(set) var answerAttachment: AnswerAttachmentState = .attached
     @Published private(set) var expansionDirection: AttachmentDirection = .below
     @Published private(set) var statusContext: TaskStatusContext?
@@ -267,6 +292,8 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
     private var panelTransitionInProgress = false
     private var composerHasAttachments = false
     private var displayedDesktopReceiptIDs = Set<String>()
+    private var activePetCaretContext: PetCaretContext?
+    private var activePetCaretScreenPoint: CGPoint?
 
     private enum Keys {
         static let alwaysOnTop = "alwaysOnTop"
@@ -647,6 +674,21 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
     func noteDesktopActivitiesDisplayed(_ activities: [CodexTaskActivity]) {
         guard isDesktopActivityStatus, isStatusVisible else { return }
         displayedDesktopReceiptIDs.formUnion(activities.compactMap(\.resolvedReceiptID))
+    }
+
+    func updatePetCaret(
+        screenPoint: CGPoint?,
+        context: PetCaretContext
+    ) {
+        if let screenPoint {
+            guard caretContextIsVisible(context) else { return }
+            activePetCaretContext = context
+            activePetCaretScreenPoint = screenPoint
+        } else if activePetCaretContext == context {
+            activePetCaretContext = nil
+            activePetCaretScreenPoint = nil
+        }
+        refreshPetLookDirection()
     }
 
     func showSettings() {
@@ -1122,6 +1164,30 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
                 self.positionAttachedPanels()
             }
         }
+    }
+
+    private func caretContextIsVisible(_ context: PetCaretContext) -> Bool {
+        switch context {
+        case .composer: isComposerVisible
+        case .answer: isAnswerVisible
+        }
+    }
+
+    private func refreshPetLookDirection() {
+        guard let panel = petPanel,
+              floatingButtonEnabled,
+              !isDraggingPet,
+              let context = activePetCaretContext,
+              caretContextIsVisible(context),
+              let caretPoint = activePetCaretScreenPoint else {
+            petLookDirection = nil
+            return
+        }
+        let direction = PetLookDirection.resolve(
+            mascotCenter: CGPoint(x: panel.frame.midX, y: panel.frame.midY),
+            target: caretPoint
+        )
+        if petLookDirection != direction { petLookDirection = direction }
     }
 
     private func ensureWindowIsOnScreen(_ window: NSWindow) {
