@@ -399,13 +399,23 @@ struct TaskStatusCard: View {
         .onHover(perform: controller.statusHoverChanged)
         .padding(PinChatVisualMetrics.statusShadowOutset)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onChange(of: model.desktopActivities.count) {
+        .onAppear { noteDisplayedTasksIfNeeded() }
+        .onChange(of: controller.statusContext) {
+            noteDisplayedTasksIfNeeded()
+        }
+        .onChange(of: model.desktopActivities) {
             controller.refreshDesktopActivityPanelLayout()
+            noteDisplayedTasksIfNeeded()
         }
         .animation(
             .spring(response: 0.34, dampingFraction: 0.82),
             value: model.desktopActivities
         )
+    }
+
+    private func noteDisplayedTasksIfNeeded() {
+        guard showsDesktopActivity else { return }
+        controller.noteDesktopActivitiesDisplayed(desktopTasks)
     }
 
     private var conversationStatus: some View {
@@ -455,13 +465,6 @@ struct TaskStatusCard: View {
                     action: controller.openCurrentConversationInCodex
                 )
                 ActionCircleButton(
-                    systemName: "checkmark",
-                    tint: Color.green.opacity(0.17),
-                    foreground: .green,
-                    help: "确认完成",
-                    action: controller.confirmCompleted
-                )
-                ActionCircleButton(
                     systemName: expansionSymbol,
                     tint: .primary.opacity(0.075),
                     foreground: .primary,
@@ -486,15 +489,24 @@ struct TaskStatusCard: View {
                 .foregroundStyle(.red)
                 .frame(width: 24, height: 24)
                 .background(Color.red.opacity(0.12), in: Circle())
+        } else if isComplete {
+            Button(action: controller.confirmCompleted) {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color.green)
+                    .frame(width: 24, height: 24)
+                    .background(Color.green.opacity(0.12), in: Circle())
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .help("确认完成")
+            .accessibilityLabel("确认完成")
         } else {
-            Image(systemName: isComplete ? "checkmark" : "sparkles")
+            Image(systemName: "sparkles")
                 .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(isComplete ? Color.green : Color.accentColor)
+                .foregroundStyle(Color.accentColor)
                 .frame(width: 24, height: 24)
-                .background(
-                    isComplete ? Color.green.opacity(0.12) : Color.accentColor.opacity(0.11),
-                    in: Circle()
-                )
+                .background(Color.accentColor.opacity(0.11), in: Circle())
         }
     }
 
@@ -666,9 +678,11 @@ struct AnswerPanelView: View {
                 .padding(.vertical, 3)
                 .background(Color.primary.opacity(0.055), in: Capsule())
             Spacer()
-            ToolbarIcon(systemName: "arrow.up.right", help: "在 Codex 中打开") {
-                controller.openCurrentConversationInCodex()
+            ToolbarIcon(systemName: "square.and.pencil", help: "新建对话") {
+                controller.startNewConversation()
             }
+            .disabled(model.isGenerating)
+            .opacity(model.isGenerating ? 0.45 : 1)
             ToolbarIcon(systemName: "xmark", help: "关闭回答") {
                 controller.closeAnswer()
             }
@@ -686,7 +700,6 @@ struct AnswerPanelView: View {
                 .font(.system(size: 14.5))
                 .lineLimit(1...4)
                 .focused($focused)
-                .disabled(model.isGenerating)
                 .onSubmit(send)
             if model.isGenerating {
                 ActionCircleButton(

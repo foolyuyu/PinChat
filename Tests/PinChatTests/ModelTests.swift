@@ -358,31 +358,55 @@ import Testing
     #expect(visible.map(\.state) == [.waiting, .thinking, .completed])
 }
 
-@Test func completedDesktopTasksAreBriefAndNeverAccumulate() {
+@Test func completedDesktopTasksWaitForViewingAndMinimumAge() {
     let now = Date()
-    let activities = [
-        CodexTaskActivity(
-            threadID: "completed-recent",
-            title: "刚刚完成",
-            state: .completed,
-            updatedAt: now.addingTimeInterval(-5)
-        ),
-        CodexTaskActivity(
-            threadID: "completed-second",
-            title: "第二个完成项",
-            state: .completed,
-            updatedAt: now.addingTimeInterval(-8)
-        ),
-        CodexTaskActivity(
-            threadID: "completed-old",
-            title: "较早完成",
-            state: .completed,
-            updatedAt: now.addingTimeInterval(-60)
-        )
-    ]
+    let recentViewed = CodexTaskActivity(
+        threadID: "recent-viewed",
+        title: "刚刚完成且已查看",
+        state: .completed,
+        updatedAt: now.addingTimeInterval(-5)
+    )
+    let oldUnviewed = CodexTaskActivity(
+        threadID: "old-unviewed",
+        title: "较早完成但未查看",
+        state: .completed,
+        updatedAt: now.addingTimeInterval(-60)
+    )
+    let oldViewed = CodexTaskActivity(
+        threadID: "old-viewed",
+        title: "较早完成且已查看",
+        state: .completed,
+        updatedAt: now.addingTimeInterval(-70)
+    )
+    let viewedReceiptIDs = Set([
+        recentViewed.resolvedReceiptID!,
+        oldViewed.resolvedReceiptID!
+    ])
 
-    let visible = CodexTaskActivityOrdering.visible(from: activities, limit: 5, now: now)
-    #expect(visible.map(\.threadID) == ["completed-recent"])
+    let visible = CodexTaskActivityOrdering.visible(
+        from: [recentViewed, oldUnviewed, oldViewed],
+        limit: 5,
+        viewedResolvedReceiptIDs: viewedReceiptIDs,
+        trackedUnviewedThreadIDs: [oldUnviewed.threadID],
+        now: now
+    )
+    #expect(visible.map(\.threadID) == ["recent-viewed", "old-unviewed"])
+
+    let afterMinimumWindow = CodexTaskActivityOrdering.visible(
+        from: [recentViewed, oldUnviewed, oldViewed],
+        limit: 5,
+        viewedResolvedReceiptIDs: viewedReceiptIDs,
+        trackedUnviewedThreadIDs: [oldUnviewed.threadID],
+        now: now.addingTimeInterval(30)
+    )
+    #expect(afterMinimumWindow.map(\.threadID) == ["old-unviewed"])
+
+    let historicalUntracked = CodexTaskActivityOrdering.visible(
+        from: [oldUnviewed],
+        limit: 5,
+        now: now
+    )
+    #expect(historicalUntracked.isEmpty)
 }
 
 @Test func hoverTimingAvoidsAccidentalFlyoversAndVisibleGaps() {
@@ -516,6 +540,21 @@ import Testing
 
     #expect(visibleSurface.size == PinChatVisualMetrics.statusSurfaceSize)
     #expect(abs(visibleSurface.maxY - (pet.minY - gap)) < 0.001)
+}
+
+@Test func followUpSendKeepsExpandedConversationVisible() {
+    #expect(ConversationSendPresentation.resolve(
+        answerIsVisible: true,
+        answerWindowIsVisible: true
+    ) == .expandedConversation)
+    #expect(ConversationSendPresentation.resolve(
+        answerIsVisible: true,
+        answerWindowIsVisible: false
+    ) == .statusOnly)
+    #expect(ConversationSendPresentation.resolve(
+        answerIsVisible: false,
+        answerWindowIsVisible: true
+    ) == .statusOnly)
 }
 
 @Test func manuallyMovingAnswerDetachesIt() {

@@ -268,6 +268,8 @@ final class CodexAppServer: @unchecked Sendable {
 
     func readDesktopTasks(
         limit: Int = 5,
+        viewedResolvedReceiptIDs: Set<String> = [],
+        trackedUnviewedThreadIDs: Set<String> = [],
         completion: @escaping @Sendable (Result<[CodexTaskActivity], Error>) -> Void
     ) {
         sendRequest(
@@ -310,7 +312,9 @@ final class CodexAppServer: @unchecked Sendable {
                 }
                 completion(.success(CodexTaskActivityOrdering.visible(
                     from: activities,
-                    limit: limit
+                    limit: limit,
+                    viewedResolvedReceiptIDs: viewedResolvedReceiptIDs,
+                    trackedUnviewedThreadIDs: trackedUnviewedThreadIDs
                 )))
             }
         }

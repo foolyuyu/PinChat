@@ -21,6 +21,18 @@ enum TaskStatusContext: Equatable, Sendable {
     case desktopActivity
 }
 
+enum ConversationSendPresentation: Equatable, Sendable {
+    case statusOnly
+    case expandedConversation
+
+    static func resolve(
+        answerIsVisible: Bool,
+        answerWindowIsVisible: Bool
+    ) -> ConversationSendPresentation {
+        answerIsVisible && answerWindowIsVisible ? .expandedConversation : .statusOnly
+    }
+}
+
 enum CodexThreadLink {
     static func makeURL(threadID: String) -> URL? {
         guard let encodedID = threadID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)
@@ -254,6 +266,7 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
     private var statusHovered = false
     private var panelTransitionInProgress = false
     private var composerHasAttachments = false
+    private var displayedDesktopReceiptIDs = Set<String>()
 
     private enum Keys {
         static let alwaysOnTop = "alwaysOnTop"
@@ -296,6 +309,7 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
     }
 
     func terminate() {
+        commitDisplayedDesktopReceiptsIfNeeded()
         hoverRevealTask?.cancel()
         hoverDismissTask?.cancel()
         if let screenParametersObserver {
@@ -336,6 +350,7 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
     }
 
     func hideCompactWindow() {
+        commitDisplayedDesktopReceiptsIfNeeded()
         isComposerVisible = false
         isStatusVisible = false
         isAnswerVisible = false
@@ -396,15 +411,25 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
             model.alertMessage = PinChatError.notSignedIn.localizedDescription
             return
         }
+        let presentation = ConversationSendPresentation.resolve(
+            answerIsVisible: isAnswerVisible,
+            answerWindowIsVisible: answerPanel?.isVisible == true
+        )
+        let keepsExpandedConversation = presentation == .expandedConversation
         isComposerVisible = false
-        isAnswerVisible = false
+        isAnswerVisible = keepsExpandedConversation
         isStatusVisible = true
         statusContext = .conversation
         composerPanel?.orderOut(nil)
-        answerPanel?.orderOut(nil)
+        if !keepsExpandedConversation {
+            answerPanel?.orderOut(nil)
+        }
         model.send(text, attachments: attachments, capabilities: capabilities)
         positionAttachedPanels()
         if let statusPanel { revealWithLift(statusPanel) }
+        if keepsExpandedConversation {
+            answerPanel?.orderFrontRegardless()
+        }
     }
 
     func setComposerHasAttachments(_ hasAttachments: Bool) {
@@ -501,6 +526,12 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
         positionAttachedPanels()
     }
 
+    func startNewConversation() {
+        guard !model.isGenerating else { return }
+        _ = model.newConversation()
+        showComposer()
+    }
+
     func confirmCompleted() {
         if model.isGenerating { model.stopGenerating() }
         _ = model.newConversation()
@@ -585,6 +616,11 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
         }
     }
 
+    func noteDesktopActivitiesDisplayed(_ activities: [CodexTaskActivity]) {
+        guard isDesktopActivityStatus, isStatusVisible else { return }
+        displayedDesktopReceiptIDs.formUnion(activities.compactMap(\.resolvedReceiptID))
+    }
+
     func showSettings() {
         model.refreshAccount()
         model.refreshConfiguration()
@@ -612,6 +648,7 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
         if petDragOffset == nil {
             cancelHoverTasks()
             if isDesktopActivityStatus {
+                commitDisplayedDesktopReceiptsIfNeeded()
                 isStatusVisible = false
                 statusContext = nil
                 statusPanel?.orderOut(nil)
@@ -835,6 +872,7 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
     private func collapseStatusPanel(
         completion: (@MainActor @Sendable () -> Void)?
     ) {
+        commitDisplayedDesktopReceiptsIfNeeded()
         guard let panel = statusPanel, panel.isVisible else {
             isStatusVisible = false
             statusContext = nil
@@ -872,6 +910,12 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
         hoverDismissTask?.cancel()
         hoverRevealTask = nil
         hoverDismissTask = nil
+    }
+
+    private func commitDisplayedDesktopReceiptsIfNeeded() {
+        guard !displayedDesktopReceiptIDs.isEmpty else { return }
+        model.markDesktopActivityReceiptsViewed(displayedDesktopReceiptIDs)
+        displayedDesktopReceiptIDs.removeAll()
     }
 
     private func openCodexThread(_ threadID: String) {

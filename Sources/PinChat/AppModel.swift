@@ -61,6 +61,10 @@ struct CodexExternalHandoffLifecycle: Equatable, Sendable {
 
 @MainActor
 final class AppModel: ObservableObject {
+    private static let viewedDesktopReceiptIDsKey = "viewedDesktopReceiptIDsV1"
+    private static let trackedDesktopThreadIDsKey = "trackedDesktopThreadIDsV1"
+    private static let maximumRememberedDesktopReceipts = 200
+
     @Published private(set) var sessions: [ChatSession]
     @Published var selectedSessionID: UUID?
     @Published private(set) var account: ChatAccount?
@@ -86,6 +90,9 @@ final class AppModel: ObservableObject {
     private var composerCapabilitiesSyncInFlight = false
     private var hasLoadedComposerCapabilities = false
     private var externalHandoffLifecycle = CodexExternalHandoffLifecycle()
+    private var viewedDesktopReceiptIDs: Set<String> = []
+    private var viewedDesktopReceiptOrder: [String] = []
+    private var trackedDesktopThreadIDs: Set<String> = []
 
     var selectedSession: ChatSession? {
         guard let selectedSessionID else { return nil }
@@ -123,6 +130,14 @@ final class AppModel: ObservableObject {
         self.store = store
         self.conversationWorkingDirectory = conversationWorkingDirectory
             ?? PinChatConversationWorkspace.prepare()
+        let storedReceiptIDs = UserDefaults.standard.stringArray(
+            forKey: Self.viewedDesktopReceiptIDsKey
+        ) ?? []
+        viewedDesktopReceiptOrder = storedReceiptIDs
+        viewedDesktopReceiptIDs = Set(storedReceiptIDs)
+        trackedDesktopThreadIDs = Set(
+            UserDefaults.standard.stringArray(forKey: Self.trackedDesktopThreadIDsKey) ?? []
+        )
         let loaded = store.load().sorted { $0.updatedAt > $1.updatedAt }
         sessions = loaded
         selectedSessionID = loaded.first?.id
@@ -363,6 +378,32 @@ final class AppModel: ObservableObject {
         syncDesktopTasks()
     }
 
+    func markDesktopActivityReceiptsViewed(_ receiptIDs: Set<String>) {
+        let newReceiptIDs = receiptIDs.subtracting(viewedDesktopReceiptIDs).sorted()
+        guard !newReceiptIDs.isEmpty else { return }
+        viewedDesktopReceiptIDs.formUnion(newReceiptIDs)
+        viewedDesktopReceiptOrder.append(contentsOf: newReceiptIDs)
+        let viewedThreadIDs = Set(newReceiptIDs.compactMap { receiptID in
+            receiptID.split(separator: "|", maxSplits: 1).first.map(String.init)
+        })
+        trackedDesktopThreadIDs.subtract(viewedThreadIDs)
+        if viewedDesktopReceiptOrder.count > Self.maximumRememberedDesktopReceipts {
+            let overflow = viewedDesktopReceiptOrder.count - Self.maximumRememberedDesktopReceipts
+            let removed = viewedDesktopReceiptOrder.prefix(overflow)
+            viewedDesktopReceiptOrder.removeFirst(overflow)
+            viewedDesktopReceiptIDs.subtract(removed)
+        }
+        UserDefaults.standard.set(
+            viewedDesktopReceiptOrder,
+            forKey: Self.viewedDesktopReceiptIDsKey
+        )
+        UserDefaults.standard.set(
+            trackedDesktopThreadIDs.sorted(),
+            forKey: Self.trackedDesktopThreadIDsKey
+        )
+        syncDesktopTasks()
+    }
+
     func refreshComposerCapabilities(force: Bool = false) {
         guard !composerCapabilitiesSyncInFlight else { return }
         guard force || !hasLoadedComposerCapabilities else { return }
@@ -453,11 +494,30 @@ final class AppModel: ObservableObject {
     private func syncDesktopTasks() {
         guard !desktopActivitySyncInFlight else { return }
         desktopActivitySyncInFlight = true
-        activityService.readDesktopTasks(limit: PinChatVisualMetrics.maximumVisibleDesktopTasks) { [weak self] result in
+        activityService.readDesktopTasks(
+            limit: PinChatVisualMetrics.maximumVisibleDesktopTasks,
+            viewedResolvedReceiptIDs: viewedDesktopReceiptIDs,
+            trackedUnviewedThreadIDs: trackedDesktopThreadIDs
+        ) { [weak self] result in
             Task { @MainActor in
                 guard let self else { return }
                 self.desktopActivitySyncInFlight = false
                 if case .success(let activities) = result {
+                    let trackedBeforeSync = self.trackedDesktopThreadIDs
+                    for activity in activities {
+                        if activity.state.isInProgress {
+                            self.trackedDesktopThreadIDs.insert(activity.threadID)
+                        } else if let receiptID = activity.resolvedReceiptID,
+                                  !self.viewedDesktopReceiptIDs.contains(receiptID) {
+                            self.trackedDesktopThreadIDs.insert(activity.threadID)
+                        }
+                    }
+                    if self.trackedDesktopThreadIDs != trackedBeforeSync {
+                        UserDefaults.standard.set(
+                            self.trackedDesktopThreadIDs.sorted(),
+                            forKey: Self.trackedDesktopThreadIDsKey
+                        )
+                    }
                     self.desktopActivities = activities
                 }
             }

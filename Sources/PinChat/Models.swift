@@ -69,6 +69,11 @@ struct CodexTaskActivity: Equatable, Sendable {
     var updatedAt: Date
 
     var id: String { threadID }
+
+    var resolvedReceiptID: String? {
+        guard state == .completed || state == .stopped else { return nil }
+        return "\(threadID)|\(updatedAt.timeIntervalSinceReferenceDate.bitPattern)"
+    }
 }
 
 enum CodexTaskActivityOrdering {
@@ -77,6 +82,8 @@ enum CodexTaskActivityOrdering {
     static func visible(
         from activities: [CodexTaskActivity],
         limit: Int,
+        viewedResolvedReceiptIDs: Set<String> = [],
+        trackedUnviewedThreadIDs: Set<String> = [],
         now: Date = Date()
     ) -> [CodexTaskActivity] {
         guard limit > 0 else { return [] }
@@ -87,15 +94,19 @@ enum CodexTaskActivityOrdering {
 
         let active = unique.filter { $0.state.isInProgress }
         let failures = unique.filter { $0.state == .failed }
-        let recentlyResolved = unique.filter {
-            ($0.state == .completed || $0.state == .stopped) &&
-            now.timeIntervalSince($0.updatedAt) <= completedVisibilityDuration
+        let resolvedReceipts = unique.filter {
+            guard let receiptID = $0.resolvedReceiptID else { return false }
+            let hasBeenViewed = viewedResolvedReceiptIDs.contains(receiptID)
+            let isTrackedAndUnviewed = trackedUnviewedThreadIDs.contains($0.threadID)
+                && !hasBeenViewed
+            let isWithinMinimumVisibility = now.timeIntervalSince($0.updatedAt)
+                <= completedVisibilityDuration
+            return isTrackedAndUnviewed || isWithinMinimumVisibility
         }
 
-        // Active work is the useful persistent signal. A failure remains visible for
-        // attention, while completed/stopped work is a short-lived receipt rather than
-        // an ever-growing history list.
-        return Array((active + failures.prefix(1) + recentlyResolved.prefix(1)).prefix(limit))
+        // Resolved work stays until it has actually been shown to the user. Once viewed,
+        // it remains eligible for at least the normal 30-second completion window.
+        return Array((active + Array(failures.prefix(1)) + resolvedReceipts).prefix(limit))
     }
 }
 
