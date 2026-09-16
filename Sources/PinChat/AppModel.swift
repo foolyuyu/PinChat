@@ -71,12 +71,15 @@ final class AppModel: ObservableObject {
     @Published private(set) var codexConfiguration: CodexConfiguration?
     @Published private(set) var connectionStatus: ConnectionStatus = .starting
     @Published private(set) var isGenerating = false
+    @Published private(set) var turnPresentation: ConversationTurnPresentation = .undetermined
     @Published private(set) var lastTurnError: String?
     @Published private(set) var desktopActivities: [CodexTaskActivity] = []
     @Published private(set) var composerCapabilities: [CodexComposerCapability] = []
     @Published private(set) var isLoadingComposerCapabilities = false
     @Published private(set) var composerCapabilitiesError: String?
     @Published var alertMessage: String?
+
+    var onTurnPresentationChanged: (@MainActor @Sendable (ConversationTurnPresentation) -> Void)?
 
     private let chatService: CodexAppServer
     private let activityService: CodexAppServer
@@ -165,6 +168,9 @@ final class AppModel: ObservableObject {
                     text: text
                 )
             }
+        }
+        chatService.onWorkActivity = { [weak self] threadID, _ in
+            Task { @MainActor in self?.observeWorkActivity(threadID: threadID) }
         }
         chatService.onTurnCompleted = { [weak self] threadID, error in
             Task { @MainActor in self?.finishTurn(threadID: threadID, error: error) }
@@ -272,6 +278,7 @@ final class AppModel: ObservableObject {
     @discardableResult
     func newConversation() -> UUID {
         if isGenerating { stopGenerating() }
+        setTurnPresentation(.undetermined)
         lastTurnError = nil
         if let selectedSession,
            selectedSession.codexThreadID == nil,
@@ -339,6 +346,7 @@ final class AppModel: ObservableObject {
         let existingThreadID = sessions[index].codexThreadID
         activeSessionID = sessionID
         activeAssistantMessageID = assistantMessage.id
+        setTurnPresentation(.undetermined)
         isGenerating = true
         sortSessionsKeepingSelection()
         persist()
@@ -565,6 +573,7 @@ final class AppModel: ObservableObject {
               sessions[sessionIndex].codexThreadID == threadID,
               let messageIndex = sessions[sessionIndex].messages.firstIndex(where: { $0.id == messageID })
         else { return }
+        observeTurnEvent(.answer)
         if let sourceID = sessions[sessionIndex].messages[messageIndex].sourceID,
            sourceID != itemID {
             return
@@ -582,6 +591,7 @@ final class AppModel: ObservableObject {
               sessions[sessionIndex].codexThreadID == threadID,
               let messageIndex = sessions[sessionIndex].messages.firstIndex(where: { $0.id == messageID })
         else { return }
+        observeTurnEvent(.answer)
         sessions[sessionIndex].messages[messageIndex].sourceID = itemID
         sessions[sessionIndex].messages[messageIndex].text = CodexAppServer.authoritativeAgentText(
             streamedText: sessions[sessionIndex].messages[messageIndex].text,
@@ -589,6 +599,25 @@ final class AppModel: ObservableObject {
         )
         sessions[sessionIndex].updatedAt = Date()
         persist()
+    }
+
+    private func observeWorkActivity(threadID: String) {
+        guard isGenerating,
+              let sessionID = activeSessionID,
+              let session = sessions.first(where: { $0.id == sessionID }),
+              session.codexThreadID == nil || session.codexThreadID == threadID
+        else { return }
+        observeTurnEvent(.workActivity)
+    }
+
+    private func observeTurnEvent(_ event: ConversationTurnPresentation.Event) {
+        setTurnPresentation(turnPresentation.observing(event))
+    }
+
+    private func setTurnPresentation(_ presentation: ConversationTurnPresentation) {
+        guard turnPresentation != presentation else { return }
+        turnPresentation = presentation
+        onTurnPresentationChanged?(presentation)
     }
 
     private func finishTurn(threadID: String, error: String?) {

@@ -1,29 +1,32 @@
-# PinChat 2.5 多任务与官方能力菜单版验证报告
+# PinChat 3.0 智能对话与任务展示版验证报告
 
-验证日期：2026-09-15（Asia/Shanghai）
+验证日期：2026-09-16（Asia/Shanghai）
 
 ## 交付物
 
-- `PinChat.app`：macOS 14+、Apple Silicon、本机 ad-hoc 签名的可运行应用，版本 0.2.5（7）。
+- `PinChat.app`：macOS 14+、Apple Silicon、本机 ad-hoc 签名的可运行应用，版本 0.3.0（8）。
 - `PinChat-source.zip`：完整 Swift Package / Xcode 工程源码，不含 Git、构建缓存和应用产物。
-- v1.0、v1.1、v2.0、v2.1、v2.2、v2.3、v2.4、v2.5 八份只读冻结需求及各自 SHA-256 校验文件。
+- v1.0、v1.1、v2.0、v2.1、v2.2、v2.3、v2.4、v2.5、v3.0 九份只读冻结需求及各自 SHA-256 校验文件。
 - v2.1 冻结需求 SHA-256：`6636da523138b5b19b64c4889f063bc7cf687cec387ff4417e924b7e4a8d7427`。
 - v2.2 冻结需求 SHA-256：`2fb38fd3a99e5214582154f2f1ea314def43c6414e6023c50733bc1e47d5d46c`。
 - v2.3 冻结需求 SHA-256：`1165cc5dfd2048c83cf1706dfb2812ae0c58c1700dcbe6d8a8e869e4811bbbe6`。
 - v2.4 冻结需求 SHA-256：`f168c3b480faab81a0ac63dea7e45e5cf294fef82e21951712738f4ebe3ea6a4`。
 - v2.5 冻结需求 SHA-256：`499a9d4987d738c7141a30d3d41b038bc38828f5c328b2d0a01b46ab0737f61c`。
+- v3.0 冻结需求 SHA-256：`b56450a0803b95f2d1021c41790da431770ab415424f7ab1471501d130f38d18`。
 
 ## 构建与自动测试
 
-- `swift test`：34 项测试全部通过。
+- `swift test`：41 项测试全部通过。
 - `xcodebuild -scheme PinChat -destination platform=macOS ... build`：通过。
 - Release 构建：通过。
 - `plutil -lint`：通过。
 - `codesign --verify --deep --strict`：通过。
-- v1.0 至 v2.5 全部冻结需求 SHA-256 校验：通过。
+- v1.0 至 v3.0 全部冻结需求 SHA-256 校验：通过。
 
 新增测试覆盖：
 
+- 正式回答触发自动对话展示，执行型事件升级为工作展示，且工作模式在本轮内不再降级。
+- 命令、文件变更、MCP/动态工具、协作子任务、检索、图片查看和审批请求的 App Server 分类。
 - 最多 5 个任务的去重、进行中优先和更新时间排序，且每个任务保留独立状态。
 - `systemError` 到失败状态的归约，以及 1 至 5 项任务面板的动态高度上限。
 - App Server 技能、可访问应用和已安装可调用应用的解析过滤。
@@ -62,6 +65,9 @@
 
 ## PinChat 对话与 Codex 交接
 
+- v3.0 每轮从“判断中”开始；纯回答出现时自动展开回答面板，执行型事件出现时保持或恢复紧凑进度卡。
+- 类型判断使用 App Server 的真实 item 与 request 事件，不扫描问题关键词；同一工作轮次不会因最终文字回答再次自动展开。
+- 自动展开只发生在状态首次从“判断中”进入“对话”时，用户手动关闭后不会被后续流式文字反复打开。
 - PinChat 自己发起请求后的思考/完成状态卡、回答展开、拖动、缩放、关闭、继续追问和 Markdown 排版保持不变。
 - v2.3 使用独立对话 App Server 处理账号、提问、流式回答和当前线程同步；独立活动观察 App Server 只读处理 `thread/list` 和桌面任务状态。
 - 对话完成卡的 `↗` 会先执行 `thread/unsubscribe`，随后彻底终止并等待对话 App Server 退出，最后使用 `codex://threads/<thread-id>` 打开同一任务。

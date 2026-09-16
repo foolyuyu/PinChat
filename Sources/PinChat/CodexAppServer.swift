@@ -46,6 +46,7 @@ final class CodexAppServer: @unchecked Sendable {
     var onAccountUpdated: (@Sendable () -> Void)?
     var onAgentDelta: (@Sendable (_ threadID: String, _ itemID: String, _ delta: String) -> Void)?
     var onAgentMessageCompleted: (@Sendable (_ threadID: String, _ itemID: String, _ text: String) -> Void)?
+    var onWorkActivity: (@Sendable (_ threadID: String, _ itemType: String) -> Void)?
     var onTurnCompleted: (@Sendable (_ threadID: String, _ error: String?) -> Void)?
     var onProcessStopped: (@Sendable (_ message: String) -> Void)?
     var onAppCapabilitiesUpdated: (@Sendable ([CodexComposerCapability]) -> Void)?
@@ -823,6 +824,11 @@ final class CodexAppServer: @unchecked Sendable {
         guard let method = message["method"] as? String,
               let params = message["params"] as? JSON else { return }
 
+        if Self.isWorkRequestMethod(method),
+           let threadID = params["threadId"] as? String {
+            onWorkActivity?(threadID, method)
+        }
+
         switch method {
         case "account/login/completed":
             let success = params["success"] as? Bool ?? false
@@ -839,8 +845,13 @@ final class CodexAppServer: @unchecked Sendable {
             let apps = Self.appCapabilities(from: params)
             if !apps.isEmpty { onAppCapabilitiesUpdated?(apps) }
         case "item/started":
-            guard let item = params["item"] as? JSON,
-                  (item["type"] as? String) == "agentMessage",
+            guard let threadID = params["threadId"] as? String,
+                  let item = params["item"] as? JSON,
+                  let itemType = item["type"] as? String else { return }
+            if Self.isWorkItemType(itemType) {
+                onWorkActivity?(threadID, itemType)
+            }
+            guard itemType == "agentMessage",
                   let itemID = item["id"] as? String else { return }
             if let phase = item["phase"] as? String {
                 agentMessagePhases[itemID] = phase
@@ -857,7 +868,11 @@ final class CodexAppServer: @unchecked Sendable {
         case "item/completed":
             guard let threadID = params["threadId"] as? String,
                   let item = params["item"] as? JSON,
-                  (item["type"] as? String) == "agentMessage",
+                  let itemType = item["type"] as? String else { return }
+            if Self.isWorkItemType(itemType) {
+                onWorkActivity?(threadID, itemType)
+            }
+            guard itemType == "agentMessage",
                   let itemID = item["id"] as? String else { return }
             let phase = item["phase"] as? String ?? agentMessagePhases[itemID]
             agentMessagePhases.removeValue(forKey: itemID)
@@ -933,6 +948,32 @@ final class CodexAppServer: @unchecked Sendable {
 
     static func shouldDisplayAgentMessage(phase: String?) -> Bool {
         phase?.lowercased() != "commentary"
+    }
+
+    static func isWorkItemType(_ itemType: String) -> Bool {
+        [
+            "commandExecution",
+            "fileChange",
+            "mcpToolCall",
+            "dynamicToolCall",
+            "collabAgentToolCall",
+            "subAgentActivity",
+            "webSearch",
+            "imageView",
+            "sleep",
+            "imageGeneration"
+        ].contains(itemType)
+    }
+
+    static func isWorkRequestMethod(_ method: String) -> Bool {
+        [
+            "item/commandExecution/requestApproval",
+            "item/fileChange/requestApproval",
+            "item/tool/requestUserInput",
+            "item/permissions/requestApproval",
+            "item/tool/call",
+            "mcpServer/elicitation/request"
+        ].contains(method)
     }
 
     static func authoritativeAgentText(streamedText: String, completedText: String) -> String {

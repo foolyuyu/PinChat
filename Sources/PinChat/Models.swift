@@ -62,6 +62,26 @@ enum CodexTaskState: String, Equatable, Sendable {
     }
 }
 
+enum ConversationTurnPresentation: String, Equatable, Sendable {
+    case undetermined
+    case conversation
+    case work
+
+    func observing(_ event: Event) -> ConversationTurnPresentation {
+        switch event {
+        case .workActivity:
+            return .work
+        case .answer:
+            return self == .undetermined ? .conversation : self
+        }
+    }
+
+    enum Event: Equatable, Sendable {
+        case answer
+        case workActivity
+    }
+}
+
 struct CodexTaskActivity: Equatable, Sendable {
     var threadID: String
     var title: String

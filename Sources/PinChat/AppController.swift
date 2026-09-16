@@ -287,6 +287,9 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
             ? true
             : defaults.bool(forKey: Keys.floatingButtonEnabled)
         super.init()
+        model.onTurnPresentationChanged = { [weak self] presentation in
+            self?.presentConversationTurn(presentation)
+        }
     }
 
     func launch() {
@@ -517,6 +520,31 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
             statusPanel?.orderFrontRegardless()
             if let answerPanel { revealWithLift(answerPanel) }
             NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+
+    private func presentConversationTurn(_ presentation: ConversationTurnPresentation) {
+        guard statusContext == .conversation, isStatusVisible else { return }
+        switch presentation {
+        case .undetermined:
+            break
+        case .conversation:
+            guard !isAnswerVisible else { return }
+            isAnswerVisible = true
+            answerAttachment = .attached
+            positionAttachedPanels()
+            statusPanel?.orderFrontRegardless()
+            if let answerPanel, !answerPanel.isVisible {
+                revealWithLift(answerPanel)
+            } else {
+                answerPanel?.orderFrontRegardless()
+            }
+        case .work:
+            guard isAnswerVisible else { return }
+            isAnswerVisible = false
+            answerPanel?.orderOut(nil)
+            positionAttachedPanels(animated: true)
+            statusPanel?.orderFrontRegardless()
         }
     }
 

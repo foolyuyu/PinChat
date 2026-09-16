@@ -557,6 +557,34 @@ import Testing
     ) == .statusOnly)
 }
 
+@Test func conversationPresentationExpandsForAnswersAndLocksToWork() {
+    #expect(ConversationTurnPresentation.undetermined.observing(.answer) == .conversation)
+    #expect(ConversationTurnPresentation.undetermined.observing(.workActivity) == .work)
+    #expect(ConversationTurnPresentation.conversation.observing(.workActivity) == .work)
+    #expect(ConversationTurnPresentation.work.observing(.answer) == .work)
+}
+
+@Test func appServerClassifiesExecutionEventsAsWork() {
+    let workItems = [
+        "commandExecution",
+        "fileChange",
+        "mcpToolCall",
+        "dynamicToolCall",
+        "collabAgentToolCall",
+        "subAgentActivity",
+        "webSearch",
+        "imageView",
+        "sleep",
+        "imageGeneration"
+    ]
+    #expect(workItems.allSatisfy(CodexAppServer.isWorkItemType))
+    #expect(!CodexAppServer.isWorkItemType("agentMessage"))
+    #expect(!CodexAppServer.isWorkItemType("reasoning"))
+    #expect(CodexAppServer.isWorkRequestMethod("item/fileChange/requestApproval"))
+    #expect(CodexAppServer.isWorkRequestMethod("item/tool/requestUserInput"))
+    #expect(!CodexAppServer.isWorkRequestMethod("account/updated"))
+}
+
 @Test func manuallyMovingAnswerDetachesIt() {
     #expect(AnswerAttachmentState.attached.afterWindowMove(isProgrammatic: true) == .attached)
     #expect(AnswerAttachmentState.attached.afterWindowMove(isProgrammatic: false) == .detached)
