@@ -123,6 +123,14 @@ enum WindowPlacement {
             return clamped(shifted, to: visibleFrame)
         }
     }
+
+    static func shadowContainerFrame(
+        around contentFrame: NSRect,
+        outset: CGFloat,
+        in visibleFrame: NSRect
+    ) -> NSRect {
+        clamped(contentFrame.insetBy(dx: -outset, dy: -outset), to: visibleFrame)
+    }
 }
 
 enum PanelPresentationPolicy {
@@ -136,29 +144,53 @@ enum PanelPresentationPolicy {
 enum PinChatVisualMetrics {
     static let petSize = NSSize(width: 64, height: 64)
     static let petArtworkSize = NSSize(width: 52, height: 56)
-    static let composerSize = NSSize(width: 334, height: 40)
-    static let composerAttachmentSize = NSSize(width: 334, height: 78)
+    static let composerSurfaceSize = NSSize(width: 334, height: 40)
+    static let composerAttachmentSurfaceSize = NSSize(width: 334, height: 78)
     static let composerContentHeight: CGFloat = 40
     static let composerSurfaceOuterInset: CGFloat = 0
+    static let composerShadowOutset: CGFloat = 40
+    static let composerSize = NSSize(
+        width: composerSurfaceSize.width + composerShadowOutset * 2,
+        height: composerSurfaceSize.height + composerShadowOutset * 2
+    )
+    static let composerAttachmentSize = NSSize(
+        width: composerAttachmentSurfaceSize.width + composerShadowOutset * 2,
+        height: composerAttachmentSurfaceSize.height + composerShadowOutset * 2
+    )
     static let composerActionSize: CGFloat = 26
-    static let statusSize = NSSize(width: 360, height: 72)
+    static let statusSurfaceWidth: CGFloat = 346
     static let statusContentHeight: CGFloat = 58
+    static let statusShadowOutset: CGFloat = 40
+    static let statusSurfaceSize = NSSize(
+        width: statusSurfaceWidth,
+        height: statusContentHeight
+    )
+    static let statusSize = NSSize(
+        width: statusSurfaceSize.width + statusShadowOutset * 2,
+        height: statusSurfaceSize.height + statusShadowOutset * 2
+    )
     static let desktopTaskRowHeight: CGFloat = 46
     static let maximumVisibleDesktopTasks = 5
     static let statusActionSize: CGFloat = 28
     static let answerSize = NSSize(width: 520, height: 420)
     static let answerToolbarActionSize: CGFloat = 24
     static let followUpActionSize: CGFloat = 30
-    static let compactSurfaceOuterInset: CGFloat = 7
     static let attachmentGap: CGFloat = 3
     static let hoverRevealDelay: TimeInterval = 0.32
     static let hoverDismissDelay: TimeInterval = 0.20
 
     static func desktopStatusSize(taskCount: Int) -> NSSize {
+        let surface = desktopStatusSurfaceSize(taskCount: taskCount)
+        return NSSize(
+            width: surface.width + statusShadowOutset * 2,
+            height: surface.height + statusShadowOutset * 2
+        )
+    }
+
+    static func desktopStatusSurfaceSize(taskCount: Int) -> NSSize {
         NSSize(
-            width: statusSize.width,
-            height: compactSurfaceOuterInset * 2
-                + desktopStatusContentHeight(taskCount: taskCount)
+            width: statusSurfaceWidth,
+            height: desktopStatusContentHeight(taskCount: taskCount)
         )
     }
 
@@ -378,7 +410,6 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
     func setComposerHasAttachments(_ hasAttachments: Bool) {
         guard composerHasAttachments != hasAttachments else { return }
         composerHasAttachments = hasAttachments
-        composerPanel?.invalidateShadow()
         if isComposerVisible {
             positionAttachedPanels(animated: true)
         }
@@ -682,9 +713,8 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
-        configureFloating(panel, hasShadow: true)
+        configureFloating(panel, hasShadow: false)
         install(MiniComposerView(model: model, controller: self), in: panel)
-        panel.invalidateShadow()
         composerPanel = panel
     }
 
@@ -934,45 +964,69 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
         let center = NSPoint(x: petPanel.frame.midX, y: petPanel.frame.midY)
         guard let visible = (screen(containing: center) ?? NSScreen.main)?.visibleFrame else { return }
 
-        var panels: [NSPanel] = []
-        var sizes: [NSSize] = []
         if isComposerVisible, let composerPanel {
-            panels.append(composerPanel)
-            sizes.append(
-                composerHasAttachments
-                    ? PinChatVisualMetrics.composerAttachmentSize
-                    : PinChatVisualMetrics.composerSize
+            let surfaceSize = composerHasAttachments
+                ? PinChatVisualMetrics.composerAttachmentSurfaceSize
+                : PinChatVisualMetrics.composerSurfaceSize
+            let shadowOutset = PinChatVisualMetrics.composerShadowOutset
+            expansionDirection = WindowPlacement.preferredAttachmentDirection(
+                anchor: petPanel.frame,
+                in: visible,
+                requiredHeight: surfaceSize.height + shadowOutset,
+                gap: PinChatVisualMetrics.attachmentGap
             )
-        } else if isStatusVisible, let statusPanel {
-            panels.append(statusPanel)
-            sizes.append(
-                isDesktopActivityStatus
-                    ? PinChatVisualMetrics.desktopStatusSize(
-                        taskCount: model.desktopActivities.count
-                    )
-                    : PinChatVisualMetrics.statusSize
+            guard let surfaceFrame = WindowPlacement.stackedFrames(
+                sizes: [surfaceSize],
+                attachedTo: petPanel.frame,
+                in: visible,
+                direction: expansionDirection,
+                gap: PinChatVisualMetrics.attachmentGap
+            ).first else { return }
+            let panelFrame = WindowPlacement.shadowContainerFrame(
+                around: surfaceFrame,
+                outset: shadowOutset,
+                in: visible
             )
-            if isAnswerVisible, !answerDetached, let answerPanel {
-                panels.append(answerPanel)
-                sizes.append(answerPanel.frame.size)
-            }
+            positioningPanels = true
+            composerPanel.setFrame(panelFrame, display: true, animate: animated)
+            positioningPanels = false
+            return
         }
-        guard !panels.isEmpty else { return }
 
-        let totalHeight = sizes.reduce(0) { $0 + $1.height }
-            + PinChatVisualMetrics.attachmentGap * CGFloat(max(0, sizes.count - 1))
+        guard isStatusVisible, let statusPanel else { return }
+        let statusSurfaceSize = isDesktopActivityStatus
+            ? PinChatVisualMetrics.desktopStatusSurfaceSize(
+                taskCount: model.desktopActivities.count
+            )
+            : PinChatVisualMetrics.statusSurfaceSize
+        var panels: [NSPanel] = [statusPanel]
+        var surfaceSizes: [NSSize] = [statusSurfaceSize]
+        if isAnswerVisible, !answerDetached, let answerPanel {
+            panels.append(answerPanel)
+            surfaceSizes.append(answerPanel.frame.size)
+        }
+
+        let totalHeight = surfaceSizes.reduce(0) { $0 + $1.height }
+            + PinChatVisualMetrics.attachmentGap * CGFloat(max(0, surfaceSizes.count - 1))
+            + PinChatVisualMetrics.statusShadowOutset
         expansionDirection = WindowPlacement.preferredAttachmentDirection(
             anchor: petPanel.frame,
             in: visible,
             requiredHeight: totalHeight,
             gap: PinChatVisualMetrics.attachmentGap
         )
-        let frames = WindowPlacement.stackedFrames(
-            sizes: sizes,
+        var frames = WindowPlacement.stackedFrames(
+            sizes: surfaceSizes,
             attachedTo: petPanel.frame,
             in: visible,
             direction: expansionDirection,
             gap: PinChatVisualMetrics.attachmentGap
+        )
+        guard !frames.isEmpty else { return }
+        frames[0] = WindowPlacement.shadowContainerFrame(
+            around: frames[0],
+            outset: PinChatVisualMetrics.statusShadowOutset,
+            in: visible
         )
 
         positioningPanels = true

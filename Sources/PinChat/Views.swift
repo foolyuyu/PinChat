@@ -29,44 +29,70 @@ private struct CompactFloatingSurface: ViewModifier {
     let cornerRadius: CGFloat
     @Environment(\.colorScheme) private var colorScheme
 
+    @ViewBuilder
     func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-        content
-            .background {
-                ZStack {
-                    BehindWindowGlass()
-                        .clipShape(shape)
-                    shape.fill(
+        if #available(macOS 26.0, *) {
+            content
+                .glassEffect(
+                    .regular.tint(
+                        Color.white.opacity(colorScheme == .dark ? 0.06 : 0.12)
+                    ),
+                    in: shape
+                )
+                .shadow(
+                    color: Color.black.opacity(colorScheme == .dark ? 0.14 : 0.045),
+                    radius: 1.5,
+                    y: 1
+                )
+                .shadow(
+                    color: Color.black.opacity(colorScheme == .dark ? 0.28 : 0.16),
+                    radius: 7,
+                    y: 3.5
+                )
+        } else {
+            content
+                .background {
+                    ZStack {
+                        BehindWindowGlass()
+                            .clipShape(shape)
+                        shape.fill(
+                            LinearGradient(
+                                colors: [
+                                    Color.white.opacity(colorScheme == .dark ? 0.08 : 0.10),
+                                    Color.white.opacity(colorScheme == .dark ? 0.035 : 0.04)
+                                ],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        )
+                    }
+                }
+                .overlay {
+                    shape.strokeBorder(
                         LinearGradient(
                             colors: [
-                                Color.white.opacity(colorScheme == .dark ? 0.08 : 0.10),
-                                Color.white.opacity(colorScheme == .dark ? 0.035 : 0.04)
+                                Color.white.opacity(colorScheme == .dark ? 0.40 : 0.66),
+                                Color.white.opacity(colorScheme == .dark ? 0.10 : 0.18),
+                                Color.black.opacity(colorScheme == .dark ? 0.12 : 0.045)
                             ],
                             startPoint: .top,
                             endPoint: .bottom
-                        )
+                        ),
+                        lineWidth: 0.8
                     )
                 }
-            }
-            .overlay {
-                shape.strokeBorder(
-                    LinearGradient(
-                        colors: [
-                            Color.white.opacity(colorScheme == .dark ? 0.40 : 0.66),
-                            Color.white.opacity(colorScheme == .dark ? 0.10 : 0.18),
-                            Color.black.opacity(colorScheme == .dark ? 0.12 : 0.045)
-                        ],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    ),
-                    lineWidth: 0.8
+                .shadow(
+                    color: Color.black.opacity(colorScheme == .dark ? 0.14 : 0.045),
+                    radius: 1.5,
+                    y: 1
                 )
-            }
-            .shadow(
-                color: Color.black.opacity(colorScheme == .dark ? 0.14 : 0.045),
-                radius: 1.5,
-                y: 1
-            )
+                .shadow(
+                    color: Color.black.opacity(colorScheme == .dark ? 0.28 : 0.16),
+                    radius: 7,
+                    y: 3.5
+                )
+        }
     }
 }
 
@@ -155,7 +181,9 @@ struct MiniComposerView: View {
                 } else {
                     ActionCircleButton(
                         systemName: "arrow.up",
-                        tint: Color(red: 0.59, green: 0.74, blue: 1.0),
+                        tint: canSubmit
+                            ? Color(red: 0.18, green: 0.47, blue: 1.0)
+                            : Color(red: 0.59, green: 0.74, blue: 1.0),
                         foreground: .white,
                         help: "发送",
                         size: PinChatVisualMetrics.composerActionSize,
@@ -168,9 +196,10 @@ struct MiniComposerView: View {
             .padding(.horizontal, 7)
             .frame(height: PinChatVisualMetrics.composerContentHeight)
         }
-        .frame(maxWidth: .infinity)
+        .frame(width: PinChatVisualMetrics.composerSurfaceSize.width)
         .compactFloatingSurface(cornerRadius: 20)
         .padding(PinChatVisualMetrics.composerSurfaceOuterInset)
+        .padding(PinChatVisualMetrics.composerShadowOutset)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear { focusSoon() }
         .onChange(of: controller.isComposerVisible) {
@@ -360,16 +389,16 @@ struct TaskStatusCard: View {
                 conversationStatus
             }
         }
-        .frame(maxWidth: .infinity)
+        .frame(width: PinChatVisualMetrics.statusSurfaceWidth)
         .frame(
             height: showsDesktopActivity
                 ? PinChatVisualMetrics.desktopStatusContentHeight(taskCount: desktopTasks.count)
                 : PinChatVisualMetrics.statusContentHeight
         )
         .compactFloatingSurface(cornerRadius: 18)
-        .padding(PinChatVisualMetrics.compactSurfaceOuterInset)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onHover(perform: controller.statusHoverChanged)
+        .padding(PinChatVisualMetrics.statusShadowOutset)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onChange(of: model.desktopActivities.count) {
             controller.refreshDesktopActivityPanelLayout()
         }

@@ -392,15 +392,20 @@ import Testing
 }
 
 @Test func compactPanelsMatchFrozenV21Targets() {
-    #expect(PinChatVisualMetrics.composerSize == NSSize(width: 334, height: 40))
-    #expect(PinChatVisualMetrics.statusSize == NSSize(width: 360, height: 72))
+    #expect(PinChatVisualMetrics.composerSurfaceSize == NSSize(width: 334, height: 40))
+    #expect(PinChatVisualMetrics.composerAttachmentSurfaceSize == NSSize(width: 334, height: 78))
+    #expect(PinChatVisualMetrics.composerSize == NSSize(width: 414, height: 120))
+    #expect(PinChatVisualMetrics.statusSurfaceSize == NSSize(width: 346, height: 58))
+    #expect(PinChatVisualMetrics.statusSize == NSSize(width: 426, height: 138))
     #expect(PinChatVisualMetrics.attachmentGap == 3)
-    #expect(PinChatVisualMetrics.composerAttachmentSize == NSSize(width: 334, height: 78))
+    #expect(PinChatVisualMetrics.composerAttachmentSize == NSSize(width: 414, height: 158))
+    #expect(PinChatVisualMetrics.composerContentHeight == 40)
     #expect(PinChatVisualMetrics.composerSurfaceOuterInset == 0)
-    #expect(PinChatVisualMetrics.compactSurfaceOuterInset == 7)
-    #expect(PinChatVisualMetrics.desktopStatusSize(taskCount: 1).height == 70)
-    #expect(PinChatVisualMetrics.desktopStatusSize(taskCount: 5).height == 258)
-    #expect(PinChatVisualMetrics.desktopStatusSize(taskCount: 99).height == 258)
+    #expect(PinChatVisualMetrics.composerShadowOutset == 40)
+    #expect(PinChatVisualMetrics.statusShadowOutset == 40)
+    #expect(PinChatVisualMetrics.desktopStatusSize(taskCount: 1).height == 136)
+    #expect(PinChatVisualMetrics.desktopStatusSize(taskCount: 5).height == 324)
+    #expect(PinChatVisualMetrics.desktopStatusSize(taskCount: 99).height == 324)
 }
 
 @Test func floatingButtonSnapsToNearestScreenEdge() {
@@ -461,6 +466,56 @@ import Testing
     #expect(answer.maxY <= status.minY)
     #expect(screen.contains(status))
     #expect(screen.contains(answer))
+}
+
+@Test func composerSurfaceIgnoresTransparentShadowMarginWhenAttached() {
+    let screen = NSRect(x: 0, y: 0, width: 1280, height: 800)
+    let pet = NSRect(x: 608, y: 500, width: 64, height: 64)
+    let gap = PinChatVisualMetrics.attachmentGap
+    let surface = WindowPlacement.stackedFrames(
+        sizes: [PinChatVisualMetrics.composerSurfaceSize],
+        attachedTo: pet,
+        in: screen,
+        direction: .below,
+        gap: gap
+    )[0]
+    let panel = WindowPlacement.shadowContainerFrame(
+        around: surface,
+        outset: PinChatVisualMetrics.composerShadowOutset,
+        in: screen
+    )
+    let visibleSurface = panel.insetBy(
+        dx: PinChatVisualMetrics.composerShadowOutset,
+        dy: PinChatVisualMetrics.composerShadowOutset
+    )
+
+    #expect(visibleSurface.size == PinChatVisualMetrics.composerSurfaceSize)
+    #expect(abs(visibleSurface.maxY - (pet.minY - gap)) < 0.001)
+}
+
+@Test func statusSurfaceIgnoresTransparentShadowMarginWhenAttached() {
+    let screen = NSRect(x: 0, y: 0, width: 1280, height: 800)
+    let pet = NSRect(x: 608, y: 500, width: 64, height: 64)
+    let gap = PinChatVisualMetrics.attachmentGap
+    let surface = WindowPlacement.stackedFrames(
+        sizes: [PinChatVisualMetrics.statusSurfaceSize],
+        attachedTo: pet,
+        in: screen,
+        direction: .below,
+        gap: gap
+    )[0]
+    let panel = WindowPlacement.shadowContainerFrame(
+        around: surface,
+        outset: PinChatVisualMetrics.statusShadowOutset,
+        in: screen
+    )
+    let visibleSurface = panel.insetBy(
+        dx: PinChatVisualMetrics.statusShadowOutset,
+        dy: PinChatVisualMetrics.statusShadowOutset
+    )
+
+    #expect(visibleSurface.size == PinChatVisualMetrics.statusSurfaceSize)
+    #expect(abs(visibleSurface.maxY - (pet.minY - gap)) < 0.001)
 }
 
 @Test func manuallyMovingAnswerDetachesIt() {
