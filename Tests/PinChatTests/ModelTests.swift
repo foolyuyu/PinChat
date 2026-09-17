@@ -84,6 +84,46 @@ import Testing
     #expect(items[1]["type"] as? String == "localImage")
 }
 
+@Test func attachmentMergingAcceptsDroppedFilesAndDirectoriesOnce() {
+    let existing = ChatAttachment(url: URL(fileURLWithPath: "/tmp/existing.txt"))
+    let merged = ChatAttachment.merging(
+        [existing],
+        urls: [
+            URL(fileURLWithPath: "/tmp/existing.txt"),
+            URL(fileURLWithPath: "/tmp/new-file.pdf"),
+            URL(fileURLWithPath: "/tmp/folder", isDirectory: true),
+            URL(fileURLWithPath: "/tmp/new-file.pdf"),
+            URL(string: "https://example.com/remote.pdf")!
+        ]
+    )
+
+    #expect(merged.map(\.path) == [
+        "/tmp/existing.txt",
+        "/tmp/new-file.pdf",
+        "/tmp/folder"
+    ])
+}
+
+@MainActor
+@Test func appMenuProvidesStandardMacEditingShortcuts() throws {
+    let mainMenu = PinChatMenuFactory.makeMainMenu()
+    let editMenu = try #require(
+        mainMenu.items.compactMap(\.submenu).first { $0.title == "编辑" }
+    )
+    let shortcuts: [String: String] = Dictionary(
+        uniqueKeysWithValues: editMenu.items.compactMap { item in
+            guard !item.keyEquivalent.isEmpty else { return nil }
+            return (item.title, item.keyEquivalent) as (String, String)
+        }
+    )
+
+    #expect(shortcuts["全选"] == "a")
+    #expect(shortcuts["复制"] == "c")
+    #expect(shortcuts["粘贴"] == "v")
+    #expect(shortcuts["剪切"] == "x")
+    #expect(shortcuts["撤销"] == "z")
+}
+
 @Test func codexTurnInputMapsSkillsAndAppsUsingOfficialItems() throws {
     let skill = CodexComposerCapability(
         kind: .skill,

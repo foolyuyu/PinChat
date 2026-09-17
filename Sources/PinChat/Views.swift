@@ -245,6 +245,7 @@ struct MiniComposerView: View {
     @State private var draft = ""
     @State private var attachments: [ChatAttachment] = []
     @State private var showsAttachmentMenu = false
+    @State private var isDropTargeted = false
     @FocusState private var focused: Bool
 
     var body: some View {
@@ -305,6 +306,25 @@ struct MiniComposerView: View {
         }
         .frame(width: PinChatVisualMetrics.composerSurfaceSize.width)
         .compactFloatingSurface(cornerRadius: 20)
+        .overlay {
+            if isDropTargeted {
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .fill(Color.accentColor.opacity(0.08))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                            .strokeBorder(Color.accentColor.opacity(0.75), lineWidth: 1.5)
+                    }
+                    .allowsHitTesting(false)
+            }
+        }
+        .dropDestination(for: URL.self) { urls, _ in
+            let fileURLs = urls.filter(\.isFileURL)
+            guard !fileURLs.isEmpty else { return false }
+            addAttachments(fileURLs)
+            return true
+        } isTargeted: { targeted in
+            isDropTargeted = targeted
+        }
         .padding(PinChatVisualMetrics.composerSurfaceOuterInset)
         .padding(PinChatVisualMetrics.composerShadowOutset)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -461,11 +481,7 @@ struct MiniComposerView: View {
     }
 
     private func addAttachments(_ urls: [URL]) {
-        let knownPaths = Set(attachments.map(\.path))
-        let additions = urls
-            .map { ChatAttachment(url: $0) }
-            .filter { !knownPaths.contains($0.path) }
-        attachments.append(contentsOf: additions)
+        attachments = ChatAttachment.merging(attachments, urls: urls)
     }
 
     private func send() {

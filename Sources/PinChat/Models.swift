@@ -249,6 +249,20 @@ struct ChatAttachment: Identifiable, Codable, Hashable, Sendable {
     }
 
     var url: URL { URL(fileURLWithPath: path) }
+
+    static func merging(
+        _ existing: [ChatAttachment],
+        urls: [URL]
+    ) -> [ChatAttachment] {
+        var result = existing
+        var knownPaths = Set(existing.map(\.path))
+        for url in urls where url.isFileURL {
+            let attachment = ChatAttachment(url: url)
+            guard knownPaths.insert(attachment.path).inserted else { continue }
+            result.append(attachment)
+        }
+        return result
+    }
 }
 
 enum CodexTaskState: String, Equatable, Sendable {
