@@ -195,6 +195,137 @@ private final class CaretObserverView: NSView {
     }
 }
 
+enum AttachmentDropSupport {
+    static let acceptedTypeIdentifiers = [
+        UTType.fileURL.identifier,
+        UTType.image.identifier
+    ]
+
+    @MainActor
+    static func load(
+        providers: [NSItemProvider],
+        receive: @escaping @MainActor @Sendable ([URL]) -> Void
+    ) -> Bool {
+        var accepted = false
+        for provider in providers {
+            if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+                accepted = true
+                provider.loadItem(
+                    forTypeIdentifier: UTType.fileURL.identifier,
+                    options: nil
+                ) { item, _ in
+                    guard let url = fileURL(from: item) else { return }
+                    Task { @MainActor in receive([url]) }
+                }
+                continue
+            }
+
+            guard let imageType = provider.registeredTypeIdentifiers.first(where: {
+                UTType($0)?.conforms(to: .image) == true
+            }) else { continue }
+            accepted = true
+            let suggestedName = provider.suggestedName
+            provider.loadDataRepresentation(forTypeIdentifier: imageType) { data, _ in
+                guard let data,
+                      let url = try? persistDroppedImage(
+                        data,
+                        typeIdentifier: imageType,
+                        suggestedName: suggestedName
+                      ) else { return }
+                Task { @MainActor in receive([url]) }
+            }
+        }
+        return accepted
+    }
+
+    static func fileURL(from item: NSSecureCoding?) -> URL? {
+        let candidate: URL?
+        switch item {
+        case let url as URL:
+            candidate = url
+        case let url as NSURL:
+            candidate = url as URL
+        case let data as Data:
+            candidate = URL(dataRepresentation: data, relativeTo: nil)
+                ?? String(data: data, encoding: .utf8).flatMap(URL.init(string:))
+        case let string as String:
+            candidate = URL(string: string)
+        case let string as NSString:
+            candidate = URL(string: string as String)
+        default:
+            candidate = nil
+        }
+        guard let candidate, candidate.isFileURL else { return nil }
+        return candidate.standardizedFileURL
+    }
+
+    static func persistDroppedImage(
+        _ data: Data,
+        typeIdentifier: String,
+        suggestedName: String?,
+        cacheRoot: URL? = nil
+    ) throws -> URL {
+        let root = cacheRoot ?? FileManager.default.urls(
+            for: .cachesDirectory,
+            in: .userDomainMask
+        ).first!
+        let directory = root
+            .appendingPathComponent("PinChat", isDirectory: true)
+            .appendingPathComponent("Attachments", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+
+        let type = UTType(typeIdentifier)
+        let fileExtension = type?.preferredFilenameExtension ?? "png"
+        let rawName = suggestedName.map {
+            URL(fileURLWithPath: $0).deletingPathExtension().lastPathComponent
+        }
+        let baseName = rawName?.isEmpty == false ? rawName! : "拖入截图"
+        let output = directory.appendingPathComponent(
+            "\(baseName)-\(UUID().uuidString).\(fileExtension)"
+        )
+        try data.write(to: output, options: .atomic)
+        return output
+    }
+}
+
+private struct AttachmentStrip: View {
+    @Binding var attachments: [ChatAttachment]
+
+    var body: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 6) {
+                ForEach(attachments) { attachment in
+                    HStack(spacing: 5) {
+                        Image(systemName: attachment.kind == .image ? "photo" : "doc")
+                            .font(.system(size: 11, weight: .medium))
+                        Text(attachment.displayName)
+                            .font(.system(size: 11.5, weight: .medium))
+                            .lineLimit(1)
+                        Button {
+                            attachments.removeAll { $0.id == attachment.id }
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 9, weight: .bold))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("移除 \(attachment.displayName)")
+                    }
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 8)
+                    .frame(height: 26)
+                    .background(Color.primary.opacity(0.055), in: Capsule())
+                }
+            }
+            .padding(.horizontal, 10)
+        }
+        .scrollIndicators(.hidden)
+        .frame(height: 38)
+    }
+}
+
 struct PetRootView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var controller: AppController
@@ -251,7 +382,7 @@ struct MiniComposerView: View {
     var body: some View {
         VStack(spacing: 0) {
             if !attachments.isEmpty {
-                supplementaryStrip
+                AttachmentStrip(attachments: $attachments)
             }
 
             HStack(spacing: 7) {
@@ -317,14 +448,11 @@ struct MiniComposerView: View {
                     .allowsHitTesting(false)
             }
         }
-        .dropDestination(for: URL.self) { urls, _ in
-            let fileURLs = urls.filter(\.isFileURL)
-            guard !fileURLs.isEmpty else { return false }
-            addAttachments(fileURLs)
-            return true
-        } isTargeted: { targeted in
-            isDropTargeted = targeted
-        }
+        .onDrop(
+            of: AttachmentDropSupport.acceptedTypeIdentifiers,
+            isTargeted: $isDropTargeted,
+            perform: acceptDroppedItems
+        )
         .padding(PinChatVisualMetrics.composerSurfaceOuterInset)
         .padding(PinChatVisualMetrics.composerShadowOutset)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -411,37 +539,6 @@ struct MiniComposerView: View {
             .background(Color.primary.opacity(0.055), in: Circle())
     }
 
-    private var supplementaryStrip: some View {
-        ScrollView(.horizontal) {
-            HStack(spacing: 6) {
-                ForEach(attachments) { attachment in
-                    HStack(spacing: 5) {
-                        Image(systemName: attachment.kind == .image ? "photo" : "doc")
-                            .font(.system(size: 11, weight: .medium))
-                        Text(attachment.displayName)
-                            .font(.system(size: 11.5, weight: .medium))
-                            .lineLimit(1)
-                        Button {
-                            attachments.removeAll { $0.id == attachment.id }
-                        } label: {
-                            Image(systemName: "xmark")
-                                .font(.system(size: 9, weight: .bold))
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("移除 \(attachment.displayName)")
-                    }
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 8)
-                    .frame(height: 26)
-                    .background(Color.primary.opacity(0.055), in: Capsule())
-                }
-            }
-            .padding(.horizontal, 10)
-        }
-        .scrollIndicators(.hidden)
-        .frame(height: 38)
-    }
-
     private var placeholder: String {
         switch model.connectionStatus {
         case .starting: "正在连接本机 Codex…"
@@ -482,6 +579,12 @@ struct MiniComposerView: View {
 
     private func addAttachments(_ urls: [URL]) {
         attachments = ChatAttachment.merging(attachments, urls: urls)
+    }
+
+    private func acceptDroppedItems(_ providers: [NSItemProvider]) -> Bool {
+        AttachmentDropSupport.load(providers: providers) { urls in
+            addAttachments(urls)
+        }
     }
 
     private func send() {
@@ -769,6 +872,8 @@ struct AnswerPanelView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var controller: AppController
     @State private var draft = ""
+    @State private var attachments: [ChatAttachment] = []
+    @State private var isDropTargeted = false
     @FocusState private var focused: Bool
 
     var body: some View {
@@ -827,52 +932,87 @@ struct AnswerPanelView: View {
     }
 
     private var followUpComposer: some View {
-        HStack(spacing: 10) {
-            TextField("继续提问…", text: $draft, axis: .vertical)
-                .textFieldStyle(.plain)
-                .font(.system(size: 14.5))
-                .lineLimit(1...4)
-                .focused($focused)
-                .onSubmit(send)
-                .background {
-                    CaretScreenPositionReader { point in
-                        controller.updatePetCaret(
-                            screenPoint: point,
-                            context: .answer
-                        )
+        VStack(spacing: 0) {
+            if !attachments.isEmpty {
+                AttachmentStrip(attachments: $attachments)
+            }
+            HStack(spacing: 10) {
+                TextField("继续提问…", text: $draft, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 14.5))
+                    .lineLimit(1...4)
+                    .focused($focused)
+                    .onSubmit(send)
+                    .background {
+                        CaretScreenPositionReader { point in
+                            controller.updatePetCaret(
+                                screenPoint: point,
+                                context: .answer
+                            )
+                        }
                     }
+                if model.isGenerating {
+                    ActionCircleButton(
+                        systemName: "stop.fill",
+                        tint: .primary.opacity(0.09),
+                        foreground: .primary,
+                        help: "停止生成",
+                        size: PinChatVisualMetrics.followUpActionSize,
+                        action: model.stopGenerating
+                    )
+                } else {
+                    ActionCircleButton(
+                        systemName: "arrow.up",
+                        tint: Color.accentColor,
+                        foreground: .white,
+                        help: "发送追问",
+                        size: PinChatVisualMetrics.followUpActionSize,
+                        action: send
+                    )
+                    .disabled(!canSubmitFollowUp)
                 }
-            if model.isGenerating {
-                ActionCircleButton(
-                    systemName: "stop.fill",
-                    tint: .primary.opacity(0.09),
-                    foreground: .primary,
-                    help: "停止生成",
-                    size: PinChatVisualMetrics.followUpActionSize,
-                    action: model.stopGenerating
-                )
-            } else {
-                ActionCircleButton(
-                    systemName: "arrow.up",
-                    tint: Color.accentColor,
-                    foreground: .white,
-                    help: "发送追问",
-                    size: PinChatVisualMetrics.followUpActionSize,
-                    action: send
-                )
-                .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 13)
+        }
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.40))
+        .overlay {
+            if isDropTargeted {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color.accentColor.opacity(0.08))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .strokeBorder(Color.accentColor.opacity(0.75), lineWidth: 1.5)
+                    }
+                    .allowsHitTesting(false)
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 13)
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.40))
+        .onDrop(
+            of: AttachmentDropSupport.acceptedTypeIdentifiers,
+            isTargeted: $isDropTargeted,
+            perform: acceptDroppedItems
+        )
+    }
+
+    private var canSubmitFollowUp: Bool {
+        !model.isGenerating
+            && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || !attachments.isEmpty)
+    }
+
+    private func acceptDroppedItems(_ providers: [NSItemProvider]) -> Bool {
+        AttachmentDropSupport.load(providers: providers) { urls in
+            attachments = ChatAttachment.merging(attachments, urls: urls)
+        }
     }
 
     private func send() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !model.isGenerating else { return }
+        guard canSubmitFollowUp else { return }
+        let selectedAttachments = attachments
         draft = ""
-        controller.sendMessage(text)
+        attachments = []
+        controller.sendMessage(text, attachments: selectedAttachments)
     }
 }
 

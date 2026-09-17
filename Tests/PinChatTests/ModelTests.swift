@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import Testing
+import UniformTypeIdentifiers
 @testable import PinChat
 
 @Test func sessionStoreRoundTrip() throws {
@@ -102,6 +103,69 @@ import Testing
         "/tmp/new-file.pdf",
         "/tmp/folder"
     ])
+}
+
+@Test func droppedAttachmentParsesNativeFileURLRepresentations() {
+    let expected = URL(fileURLWithPath: "/tmp/截屏 2026-09-18.png")
+
+    #expect(AttachmentDropSupport.fileURL(from: expected as NSURL) == expected)
+    #expect(
+        AttachmentDropSupport.fileURL(from: expected.dataRepresentation as NSData)
+            == expected
+    )
+    #expect(
+        AttachmentDropSupport.fileURL(
+            from: "https://example.com/not-local.png" as NSString
+        ) == nil
+    )
+}
+
+@Test func droppedImageDataIsPersistedAsARealLocalAttachment() throws {
+    let cacheRoot = FileManager.default.temporaryDirectory
+        .appendingPathComponent("PinChatDropTests-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: cacheRoot) }
+    let imageData = Data([0x89, 0x50, 0x4E, 0x47])
+
+    let url = try AttachmentDropSupport.persistDroppedImage(
+        imageData,
+        typeIdentifier: UTType.png.identifier,
+        suggestedName: "截屏 2026-09-18.png",
+        cacheRoot: cacheRoot
+    )
+
+    #expect(url.isFileURL)
+    #expect(url.pathExtension == "png")
+    #expect(url.lastPathComponent.hasPrefix("截屏 2026-09-18-"))
+    #expect(try Data(contentsOf: url) == imageData)
+    #expect(ChatAttachment(url: url).kind == .image)
+}
+
+@MainActor
+@Test func screenshotImageProviderCompletesTheDropPipeline() async throws {
+    let imageData = Data([0x89, 0x50, 0x4E, 0x47])
+    let provider = NSItemProvider()
+    provider.suggestedName = "拖放截图.png"
+    provider.registerDataRepresentation(
+        forTypeIdentifier: UTType.png.identifier,
+        visibility: .all
+    ) { completion in
+        completion(imageData, nil)
+        return nil
+    }
+
+    let urls = await withCheckedContinuation { continuation in
+        let accepted = AttachmentDropSupport.load(providers: [provider]) { urls in
+            continuation.resume(returning: urls)
+        }
+        #expect(accepted)
+    }
+    let url = try #require(urls.first)
+    defer { try? FileManager.default.removeItem(at: url) }
+
+    #expect(url.isFileURL)
+    #expect(url.pathExtension == "png")
+    #expect(try Data(contentsOf: url) == imageData)
+    #expect(ChatAttachment(url: url).kind == .image)
 }
 
 @MainActor

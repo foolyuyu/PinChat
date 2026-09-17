@@ -130,7 +130,7 @@ final class CodexAppServer: @unchecked Sendable {
                             "title": purpose == .conversation
                                 ? "PinChat"
                                 : "PinChat Activity Observer",
-                            "version": "0.3.4"
+                            "version": "0.3.5"
                         ]
                     ]
                 ) { result in

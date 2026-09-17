@@ -1,12 +1,12 @@
-# PinChat 3.4 原生输入与拖放版验证报告
+# PinChat 3.5 截图拖放修复版验证报告
 
 验证日期：2026-09-17（Asia/Shanghai）
 
 ## 交付物
 
-- `PinChat.app`：macOS 14+、Apple Silicon、本机 ad-hoc 签名的可运行应用，版本 0.3.4（12）。
+- `PinChat.app`：macOS 14+、Apple Silicon、本机 ad-hoc 签名的可运行应用，版本 0.3.5（13）。
 - `PinChat-source.zip`：完整 Swift Package / Xcode 工程源码，不含 Git、构建缓存和应用产物。
-- v1.0、v1.1、v2.0、v2.1、v2.2、v2.3、v2.4、v2.5、v3.0、v3.1、v3.2、v3.3、v3.4 十三份只读冻结需求及各自 SHA-256 校验文件。
+- v1.0、v1.1、v2.0、v2.1、v2.2、v2.3、v2.4、v2.5、v3.0、v3.1、v3.2、v3.3、v3.4、v3.5 十四份只读冻结需求及各自 SHA-256 校验文件。
 - v2.1 冻结需求 SHA-256：`6636da523138b5b19b64c4889f063bc7cf687cec387ff4417e924b7e4a8d7427`。
 - v2.2 冻结需求 SHA-256：`2fb38fd3a99e5214582154f2f1ea314def43c6414e6023c50733bc1e47d5d46c`。
 - v2.3 冻结需求 SHA-256：`1165cc5dfd2048c83cf1706dfb2812ae0c58c1700dcbe6d8a8e869e4811bbbe6`。
@@ -17,15 +17,24 @@
 - v3.2 冻结需求 SHA-256：`719a0d1ee6e2b8f02ae89dffef9955850ee3a02b9609723277b09447469447d1`。
 - v3.3 冻结需求 SHA-256：`4435c230208442d9b3b1a2730d6014c27fea92fd035ce789858db9b3114b68db`。
 - v3.4 冻结需求 SHA-256：`72f3a23e46cc7c0066b75f095ee75201c74a2683dfa7fff613efd7f25804553a`。
+- v3.5 冻结需求 SHA-256：`51ac5aa362e73471449ad84c6c19c8783b4825c24449efe4d2200fb1545414ef`。
 
 ## 构建与自动测试
 
-- `swift test`：53 项测试全部通过。
+- `swift test`：56 项测试全部通过。
 - `xcodebuild -scheme PinChat -destination platform=macOS ... build`：通过。
 - Release 构建：通过。
 - `plutil -lint`：通过。
 - `codesign --verify --deep --strict`：通过。
-- v1.0 至 v3.4 全部冻结需求 SHA-256 校验：通过。
+- v1.0 至 v3.5 全部冻结需求 SHA-256 校验：通过。
+
+## 截图拖放修复验证
+
+- 紧凑输入条与展开回答后的追问区共用同一 macOS 原生拖放接收器和附件标签组件。
+- 接收器优先解析 Finder 提供的本机文件 URL；同时接受 PNG、JPEG、HEIC、TIFF 等图片数据，解决截图缩略图或图片应用未提供直接 URL 时无法加入的问题。
+- 原始图片数据写入 `~/Library/Caches/PinChat/Attachments` 下的唯一文件，发送时继续使用 Codex 原生 `localImage` 输入，不修改拖拽来源。
+- 回答追问区允许仅附件发送，也允许文字与附件一起发送；发送后清空本轮附件标签并继续保持回答窗口展开。
+- 新增测试覆盖 macOS URL/NSData 文件表示、远程 URL 拒绝、拖入图片缓存及图片附件类型识别。
 
 ## 原生文本快捷键与附件拖放验证
 
