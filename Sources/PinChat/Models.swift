@@ -22,58 +22,144 @@ enum PinChatConversationWorkspace {
     }
 }
 
-enum PinChatPermissionMode: String, CaseIterable, Identifiable, Sendable {
+enum CodexPermissionConfiguration: Equatable, Sendable {
+    case serverDefault
+    case readOnly
     case askForApproval
     case approveForMe
     case fullAccess
-
-    var id: String { rawValue }
+    case profile(String)
 
     var title: String {
         switch self {
+        case .serverDefault: return "Codex 默认设置"
+        case .readOnly: return "只读"
         case .askForApproval: return "询问批准"
-        case .approveForMe: return "自动批准"
+        case .approveForMe: return "自动审查"
         case .fullAccess: return "完全访问"
+        case .profile: return "自定义权限"
         }
     }
 
     var detail: String {
         switch self {
+        case .serverDefault:
+            return "由本机 Codex App Server 使用当前默认权限。"
+        case .readOnly:
+            return "跟随本机 Codex：仅允许读取，执行或修改时由 Codex 决定是否询问。"
         case .askForApproval:
-            return "可在工作区内读写；越界操作会先询问你。"
+            return "跟随本机 Codex：可在工作区内读写，越界操作会先询问你。"
         case .approveForMe:
-            return "可在工作区内读写；符合条件的越界请求由 Codex 自动审查。"
+            return "跟随本机 Codex：符合条件的越界请求由 Codex 自动审查。"
         case .fullAccess:
-            return "不使用 Codex 文件与网络沙箱，也不会显示普通越界审批。"
+            return "跟随本机 Codex：不使用文件与网络沙箱，也不显示普通越界审批。"
+        case .profile(let id):
+            return "跟随本机 Codex 自定义权限配置：\(id)"
         }
     }
 
-    var systemImage: String {
+    var approvalPolicy: String? {
         switch self {
-        case .askForApproval: return "hand.raised"
-        case .approveForMe: return "checkmark.shield"
-        case .fullAccess: return "lock.open"
-        }
-    }
-
-    var approvalPolicy: String {
-        switch self {
+        case .serverDefault, .profile: return nil
+        case .readOnly: return "on-request"
         case .askForApproval, .approveForMe: return "on-request"
         case .fullAccess: return "never"
         }
     }
 
-    var approvalsReviewer: String {
+    var approvalsReviewer: String? {
         switch self {
+        case .serverDefault, .profile: return nil
         case .approveForMe: return "auto_review"
-        case .askForApproval, .fullAccess: return "user"
+        case .readOnly, .askForApproval, .fullAccess: return "user"
         }
     }
 
-    var sandboxMode: String {
+    var sandboxMode: String? {
         switch self {
+        case .serverDefault, .profile: return nil
+        case .readOnly: return "read-only"
         case .askForApproval, .approveForMe: return "workspace-write"
         case .fullAccess: return "danger-full-access"
+        }
+    }
+
+    var permissionProfileID: String? {
+        guard case .profile(let id) = self else { return nil }
+        return id
+    }
+
+    func sandboxPolicy(workingDirectory: String) -> [String: Any]? {
+        switch self {
+        case .serverDefault, .profile:
+            return nil
+        case .readOnly:
+            return ["type": "readOnly", "networkAccess": false]
+        case .askForApproval, .approveForMe:
+            return [
+                "type": "workspaceWrite",
+                "writableRoots": [workingDirectory],
+                "networkAccess": true,
+                "excludeTmpdirEnvVar": false,
+                "excludeSlashTmp": false
+            ]
+        case .fullAccess:
+            return ["type": "dangerFullAccess"]
+        }
+    }
+}
+
+enum CodexDesktopPermissionSettings {
+    static func readCurrent(
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> CodexPermissionConfiguration? {
+        let url = homeDirectory
+            .appendingPathComponent(".codex", isDirectory: true)
+            .appendingPathComponent(".codex-global-state.json")
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return configuration(from: data)
+    }
+
+    static func configuration(from data: Data) -> CodexPermissionConfiguration? {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let state = root["electron-persisted-atom-state"] as? [String: Any] else {
+            return nil
+        }
+
+        if let selection = state["permission-selection-by-host-id:local"] as? [String: Any],
+           let kind = selection["kind"] as? String {
+            switch kind {
+            case "agent-mode":
+                if let mode = selection["agentMode"] as? String,
+                   let configuration = configuration(agentMode: mode) {
+                    return configuration
+                }
+            case "profile":
+                if let profileID = selection["profileId"] as? String, !profileID.isEmpty {
+                    return .profile(profileID)
+                }
+            case "server-default":
+                return .serverDefault
+            default:
+                break
+            }
+        }
+
+        if let modes = state["agent-mode-by-host-id"] as? [String: Any],
+           let mode = modes["local"] as? String {
+            return configuration(agentMode: mode)
+        }
+        return .serverDefault
+    }
+
+    private static func configuration(agentMode: String) -> CodexPermissionConfiguration? {
+        switch agentMode {
+        case "read-only": return .readOnly
+        case "auto": return .askForApproval
+        case "guardian-approvals": return .approveForMe
+        case "full-access": return .fullAccess
+        case "custom", "granular": return .serverDefault
+        default: return nil
         }
     }
 }

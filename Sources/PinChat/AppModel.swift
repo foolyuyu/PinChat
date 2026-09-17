@@ -63,7 +63,6 @@ struct CodexExternalHandoffLifecycle: Equatable, Sendable {
 final class AppModel: ObservableObject {
     private static let viewedDesktopReceiptIDsKey = "viewedDesktopReceiptIDsV1"
     private static let trackedDesktopThreadIDsKey = "trackedDesktopThreadIDsV1"
-    private static let permissionModeKey = "pinChatPermissionModeV1"
     private static let maximumRememberedDesktopReceipts = 200
 
     @Published private(set) var sessions: [ChatSession]
@@ -79,11 +78,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var isLoadingComposerCapabilities = false
     @Published private(set) var composerCapabilitiesError: String?
     @Published var alertMessage: String?
-    @Published var permissionMode: PinChatPermissionMode {
-        didSet {
-            UserDefaults.standard.set(permissionMode.rawValue, forKey: Self.permissionModeKey)
-        }
-    }
+    @Published private(set) var codexPermissionConfiguration: CodexPermissionConfiguration = .serverDefault
     @Published private(set) var approvalRequests: [CodexApprovalRequest] = []
 
     var onTurnPresentationChanged: (@MainActor @Sendable (ConversationTurnPresentation) -> Void)?
@@ -142,9 +137,8 @@ final class AppModel: ObservableObject {
         self.store = store
         self.conversationWorkingDirectory = conversationWorkingDirectory
             ?? PinChatConversationWorkspace.prepare()
-        permissionMode = UserDefaults.standard.string(forKey: Self.permissionModeKey)
-            .flatMap(PinChatPermissionMode.init(rawValue:))
-            ?? .askForApproval
+        codexPermissionConfiguration = CodexDesktopPermissionSettings.readCurrent()
+            ?? .serverDefault
         let storedReceiptIDs = UserDefaults.standard.stringArray(
             forKey: Self.viewedDesktopReceiptIDsKey
         ) ?? []
@@ -375,12 +369,13 @@ final class AppModel: ObservableObject {
         sortSessionsKeepingSelection()
         persist()
 
+        let permissionConfiguration = refreshCodexPermissionConfiguration()
         chatService.sendMessage(
             text: text,
             attachments: attachments,
             capabilities: capabilities,
             workingDirectory: conversationWorkingDirectory,
-            permissionMode: permissionMode,
+            permissionConfiguration: permissionConfiguration,
             existingThreadID: existingThreadID,
             onThreadReady: { [weak self] threadID in
                 Task { @MainActor in self?.attach(threadID: threadID, to: sessionID) }
@@ -479,6 +474,14 @@ final class AppModel: ObservableObject {
         }
     }
 
+    @discardableResult
+    func refreshCodexPermissionConfiguration() -> CodexPermissionConfiguration {
+        if let current = CodexDesktopPermissionSettings.readCurrent() {
+            codexPermissionConfiguration = current
+        }
+        return codexPermissionConfiguration
+    }
+
     func releaseCurrentConversationForCodex(
         completion: @escaping @MainActor @Sendable (Result<Void, Error>) -> Void
     ) {
@@ -488,10 +491,11 @@ final class AppModel: ObservableObject {
         }
         externalHandoffLifecycle.beginHandoff()
         connectionStatus = .starting
+        let permissionConfiguration = refreshCodexPermissionConfiguration()
         chatService.releaseThreadForExternalClient(
             threadID: threadID,
             workingDirectory: conversationWorkingDirectory,
-            permissionMode: permissionMode
+            permissionConfiguration: permissionConfiguration
         ) { [weak self] result in
             Task { @MainActor in
                 guard let self else { return }

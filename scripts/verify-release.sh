@@ -27,6 +27,8 @@ pet_interaction_baseline="${output_dir}/PET_INTERACTION_REQUIREMENTS_BASELINE_v3
 pet_interaction_baseline_checksum="${output_dir}/PET_INTERACTION_REQUIREMENTS_BASELINE_v3.1.sha256"
 permissions_baseline="${output_dir}/PERMISSIONS_REQUIREMENTS_BASELINE_v3.2.md"
 permissions_baseline_checksum="${output_dir}/PERMISSIONS_REQUIREMENTS_BASELINE_v3.2.sha256"
+permission_follow_baseline="${output_dir}/CODEX_PERMISSION_FOLLOW_REQUIREMENTS_BASELINE_v3.3.md"
+permission_follow_baseline_checksum="${output_dir}/CODEX_PERMISSION_FOLLOW_REQUIREMENTS_BASELINE_v3.3.sha256"
 
 cd "$package_dir"
 swift test
@@ -60,6 +62,8 @@ test -r "$pet_interaction_baseline"
 test -r "$pet_interaction_baseline_checksum"
 test -r "$permissions_baseline"
 test -r "$permissions_baseline_checksum"
+test -r "$permission_follow_baseline"
+test -r "$permission_follow_baseline_checksum"
 (
     cd "$output_dir"
     shasum -a 256 -c "${baseline_checksum:t}"
@@ -73,6 +77,7 @@ test -r "$permissions_baseline_checksum"
     shasum -a 256 -c "${presentation_baseline_checksum:t}"
     shasum -a 256 -c "${pet_interaction_baseline_checksum:t}"
     shasum -a 256 -c "${permissions_baseline_checksum:t}"
+    shasum -a 256 -c "${permission_follow_baseline_checksum:t}"
 )
 
 echo "PinChat release verification passed: $app_dir"

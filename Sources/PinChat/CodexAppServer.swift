@@ -130,7 +130,7 @@ final class CodexAppServer: @unchecked Sendable {
                             "title": purpose == .conversation
                                 ? "PinChat"
                                 : "PinChat Activity Observer",
-                            "version": "0.3.2"
+                            "version": "0.3.3"
                         ]
                     ]
                 ) { result in
@@ -442,7 +442,7 @@ final class CodexAppServer: @unchecked Sendable {
         attachments: [ChatAttachment] = [],
         capabilities: [CodexComposerCapability] = [],
         workingDirectory: String,
-        permissionMode: PinChatPermissionMode,
+        permissionConfiguration: CodexPermissionConfiguration,
         existingThreadID: String?,
         onThreadReady: @escaping @Sendable (String) -> Void,
         onTurnStarted: @escaping @Sendable (ActiveTurn) -> Void,
@@ -451,7 +451,7 @@ final class CodexAppServer: @unchecked Sendable {
         prepareThread(
             existingThreadID: existingThreadID,
             workingDirectory: workingDirectory,
-            permissionMode: permissionMode
+            permissionConfiguration: permissionConfiguration
         ) { [weak self] result in
             guard let self else { return }
             switch result {
@@ -459,18 +459,24 @@ final class CodexAppServer: @unchecked Sendable {
                 completion(.failure(error))
             case .success(let threadID):
                 onThreadReady(threadID)
+                var turnParameters: JSON = [
+                    "threadId": threadID,
+                    "input": Self.turnInputItems(
+                        text: text,
+                        attachments: attachments,
+                        capabilities: capabilities
+                    ),
+                    "cwd": workingDirectory,
+                    "turnTrigger": "user"
+                ]
+                Self.apply(
+                    permissionConfiguration,
+                    workingDirectory: workingDirectory,
+                    toTurnParameters: &turnParameters
+                )
                 self.sendRequest(
                     method: "turn/start",
-                    params: [
-                        "threadId": threadID,
-                        "input": Self.turnInputItems(
-                            text: text,
-                            attachments: attachments,
-                            capabilities: capabilities
-                        ),
-                        "cwd": workingDirectory,
-                        "turnTrigger": "user"
-                    ]
+                    params: turnParameters
                 ) { response in
                     switch response {
                     case .failure(let error):
@@ -718,7 +724,7 @@ final class CodexAppServer: @unchecked Sendable {
     func releaseThreadForExternalClient(
         threadID: String,
         workingDirectory: String,
-        permissionMode: PinChatPermissionMode,
+        permissionConfiguration: CodexPermissionConfiguration,
         completion: @escaping @Sendable (Result<Void, Error>) -> Void
     ) {
         // Older PinChat threads were created without a cwd. Resuming with the
@@ -729,7 +735,7 @@ final class CodexAppServer: @unchecked Sendable {
             params: Self.threadResumeParameters(
                 threadID: threadID,
                 workingDirectory: workingDirectory,
-                permissionMode: permissionMode
+                permissionConfiguration: permissionConfiguration
             )
         ) { [weak self] resumeResult in
             guard let self else { return }
@@ -763,7 +769,7 @@ final class CodexAppServer: @unchecked Sendable {
     private func prepareThread(
         existingThreadID: String?,
         workingDirectory: String,
-        permissionMode: PinChatPermissionMode,
+        permissionConfiguration: CodexPermissionConfiguration,
         completion: @escaping @Sendable (Result<String, Error>) -> Void
     ) {
         if let existingThreadID {
@@ -772,7 +778,7 @@ final class CodexAppServer: @unchecked Sendable {
                 params: Self.threadResumeParameters(
                     threadID: existingThreadID,
                     workingDirectory: workingDirectory,
-                    permissionMode: permissionMode
+                    permissionConfiguration: permissionConfiguration
                 )
             ) { result in
                 completion(result.map { _ in existingThreadID })
@@ -784,7 +790,7 @@ final class CodexAppServer: @unchecked Sendable {
             method: "thread/start",
             params: Self.threadStartParameters(
                 workingDirectory: workingDirectory,
-                permissionMode: permissionMode
+                permissionConfiguration: permissionConfiguration
             )
         ) { result in
             switch result {
@@ -803,30 +809,80 @@ final class CodexAppServer: @unchecked Sendable {
 
     static func threadStartParameters(
         workingDirectory: String,
-        permissionMode: PinChatPermissionMode = .askForApproval
+        permissionConfiguration: CodexPermissionConfiguration = .serverDefault
     ) -> JSON {
-        [
+        var parameters: JSON = [
             "cwd": workingDirectory,
-            "approvalPolicy": permissionMode.approvalPolicy,
-            "approvalsReviewer": permissionMode.approvalsReviewer,
-            "sandbox": permissionMode.sandboxMode,
             "ephemeral": false
         ]
+        apply(permissionConfiguration, toThreadParameters: &parameters)
+        return parameters
     }
 
     static func threadResumeParameters(
         threadID: String,
         workingDirectory: String,
-        permissionMode: PinChatPermissionMode = .askForApproval
+        permissionConfiguration: CodexPermissionConfiguration = .serverDefault
     ) -> JSON {
-        [
+        var parameters: JSON = [
             "threadId": threadID,
             "cwd": workingDirectory,
-            "approvalPolicy": permissionMode.approvalPolicy,
-            "approvalsReviewer": permissionMode.approvalsReviewer,
-            "sandbox": permissionMode.sandboxMode,
             "excludeTurns": true
         ]
+        apply(permissionConfiguration, toThreadParameters: &parameters)
+        return parameters
+    }
+
+    static func turnStartPermissionParameters(
+        workingDirectory: String,
+        permissionConfiguration: CodexPermissionConfiguration
+    ) -> JSON {
+        var parameters: JSON = [:]
+        apply(
+            permissionConfiguration,
+            workingDirectory: workingDirectory,
+            toTurnParameters: &parameters
+        )
+        return parameters
+    }
+
+    private static func apply(
+        _ permissionConfiguration: CodexPermissionConfiguration,
+        toThreadParameters parameters: inout JSON
+    ) {
+        if let approvalPolicy = permissionConfiguration.approvalPolicy {
+            parameters["approvalPolicy"] = approvalPolicy
+        }
+        if let reviewer = permissionConfiguration.approvalsReviewer {
+            parameters["approvalsReviewer"] = reviewer
+        }
+        if let sandbox = permissionConfiguration.sandboxMode {
+            parameters["sandbox"] = sandbox
+        }
+        if let profileID = permissionConfiguration.permissionProfileID {
+            parameters["permissions"] = profileID
+        }
+    }
+
+    private static func apply(
+        _ permissionConfiguration: CodexPermissionConfiguration,
+        workingDirectory: String,
+        toTurnParameters parameters: inout JSON
+    ) {
+        if let approvalPolicy = permissionConfiguration.approvalPolicy {
+            parameters["approvalPolicy"] = approvalPolicy
+        }
+        if let reviewer = permissionConfiguration.approvalsReviewer {
+            parameters["approvalsReviewer"] = reviewer
+        }
+        if let sandboxPolicy = permissionConfiguration.sandboxPolicy(
+            workingDirectory: workingDirectory
+        ) {
+            parameters["sandboxPolicy"] = sandboxPolicy
+        }
+        if let profileID = permissionConfiguration.permissionProfileID {
+            parameters["permissions"] = profileID
+        }
     }
 
     private static func indexedThread(_ value: JSON) -> IndexedThread? {

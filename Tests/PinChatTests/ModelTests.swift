@@ -777,23 +777,53 @@ import Testing
     #expect(merged[0].text == "正在生成并已经完成")
 }
 
-@Test func permissionModesMatchOfficialCodexPermissionSemantics() {
-    #expect(PinChatPermissionMode.askForApproval.approvalPolicy == "on-request")
-    #expect(PinChatPermissionMode.askForApproval.approvalsReviewer == "user")
-    #expect(PinChatPermissionMode.askForApproval.sandboxMode == "workspace-write")
+@Test func inheritedPermissionConfigurationsMatchOfficialCodexSemantics() {
+    #expect(CodexPermissionConfiguration.askForApproval.approvalPolicy == "on-request")
+    #expect(CodexPermissionConfiguration.askForApproval.approvalsReviewer == "user")
+    #expect(CodexPermissionConfiguration.askForApproval.sandboxMode == "workspace-write")
 
-    #expect(PinChatPermissionMode.approveForMe.approvalPolicy == "on-request")
-    #expect(PinChatPermissionMode.approveForMe.approvalsReviewer == "auto_review")
-    #expect(PinChatPermissionMode.approveForMe.sandboxMode == "workspace-write")
+    #expect(CodexPermissionConfiguration.approveForMe.approvalPolicy == "on-request")
+    #expect(CodexPermissionConfiguration.approveForMe.approvalsReviewer == "auto_review")
+    #expect(CodexPermissionConfiguration.approveForMe.sandboxMode == "workspace-write")
 
-    #expect(PinChatPermissionMode.fullAccess.approvalPolicy == "never")
-    #expect(PinChatPermissionMode.fullAccess.sandboxMode == "danger-full-access")
+    #expect(CodexPermissionConfiguration.fullAccess.approvalPolicy == "never")
+    #expect(CodexPermissionConfiguration.fullAccess.sandboxMode == "danger-full-access")
 }
 
-@Test func appServerThreadsReceiveTheSelectedPermissionMode() {
+@Test func codexDesktopPermissionSelectionIsReadFromSharedState() throws {
+    let fullAccess = try #require("""
+    {
+      "electron-persisted-atom-state": {
+        "agent-mode-by-host-id": {"local": "auto"},
+        "permission-selection-by-host-id:local": {
+          "kind": "agent-mode",
+          "agentMode": "full-access"
+        }
+      }
+    }
+    """.data(using: .utf8))
+    #expect(CodexDesktopPermissionSettings.configuration(from: fullAccess) == .fullAccess)
+
+    let profile = try #require("""
+    {
+      "electron-persisted-atom-state": {
+        "permission-selection-by-host-id:local": {
+          "kind": "profile",
+          "profileId": "trusted-projects"
+        }
+      }
+    }
+    """.data(using: .utf8))
+    #expect(
+        CodexDesktopPermissionSettings.configuration(from: profile)
+            == .profile("trusted-projects")
+    )
+}
+
+@Test func appServerThreadsAndTurnsReceiveInheritedCodexPermissions() throws {
     let start = CodexAppServer.threadStartParameters(
         workingDirectory: "/tmp/workspace",
-        permissionMode: .approveForMe
+        permissionConfiguration: .approveForMe
     )
     #expect(start["approvalPolicy"] as? String == "on-request")
     #expect(start["approvalsReviewer"] as? String == "auto_review")
@@ -802,11 +832,27 @@ import Testing
     let resume = CodexAppServer.threadResumeParameters(
         threadID: "thread-1",
         workingDirectory: "/tmp/workspace",
-        permissionMode: .fullAccess
+        permissionConfiguration: .fullAccess
     )
     #expect(resume["threadId"] as? String == "thread-1")
     #expect(resume["approvalPolicy"] as? String == "never")
     #expect(resume["sandbox"] as? String == "danger-full-access")
+
+    let turn = CodexAppServer.turnStartPermissionParameters(
+        workingDirectory: "/tmp/workspace",
+        permissionConfiguration: .fullAccess
+    )
+    #expect(turn["approvalPolicy"] as? String == "never")
+    let sandboxPolicy = try #require(turn["sandboxPolicy"] as? [String: Any])
+    #expect(sandboxPolicy["type"] as? String == "dangerFullAccess")
+
+    let inherited = CodexAppServer.threadStartParameters(
+        workingDirectory: "/tmp/workspace",
+        permissionConfiguration: .serverDefault
+    )
+    #expect(inherited["approvalPolicy"] == nil)
+    #expect(inherited["approvalsReviewer"] == nil)
+    #expect(inherited["sandbox"] == nil)
 }
 
 @Test func commandApprovalSupportsOnceSessionAndDeclineDecisions() throws {

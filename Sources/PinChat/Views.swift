@@ -255,7 +255,6 @@ struct MiniComposerView: View {
 
             HStack(spacing: 7) {
                 attachmentMenu
-                permissionMenu
 
                 TextField(placeholder, text: $draft, axis: .vertical)
                     .textFieldStyle(.plain)
@@ -309,39 +308,20 @@ struct MiniComposerView: View {
         .padding(PinChatVisualMetrics.composerSurfaceOuterInset)
         .padding(PinChatVisualMetrics.composerShadowOutset)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onAppear { focusSoon() }
+        .onAppear {
+            model.refreshCodexPermissionConfiguration()
+            focusSoon()
+        }
         .onChange(of: controller.isComposerVisible) {
-            if controller.isComposerVisible { focusSoon() }
+            if controller.isComposerVisible {
+                model.refreshCodexPermissionConfiguration()
+                focusSoon()
+            }
         }
         .onChange(of: attachments.isEmpty) {
             updateComposerHeight()
         }
         .onExitCommand { controller.hideComposer() }
-    }
-
-    private var permissionMenu: some View {
-        Menu {
-            ForEach(PinChatPermissionMode.allCases) { mode in
-                Button {
-                    model.permissionMode = mode
-                } label: {
-                    Label {
-                        Text(mode.title)
-                    } icon: {
-                        Image(systemName: model.permissionMode == mode
-                            ? "checkmark"
-                            : mode.systemImage)
-                    }
-                }
-            }
-        } label: {
-            composerLeadingIcon(systemName: model.permissionMode.systemImage)
-        }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .help("权限：\(model.permissionMode.title)")
-        .accessibilityLabel("Codex 权限：\(model.permissionMode.title)")
     }
 
     @ViewBuilder
@@ -623,17 +603,14 @@ struct TaskStatusCard: View {
                 .frame(width: 24, height: 24)
                 .background(Color.red.opacity(0.12), in: Circle())
         } else if isComplete {
-            Button(action: controller.confirmCompleted) {
-                Image(systemName: "checkmark")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Color.green)
-                    .frame(width: 24, height: 24)
-                    .background(Color.green.opacity(0.12), in: Circle())
-                    .contentShape(Circle())
-            }
-            .buttonStyle(.plain)
-            .help("确认完成")
-            .accessibilityLabel("确认完成")
+            ActionCircleButton(
+                systemName: "checkmark",
+                tint: Color.green.opacity(0.12),
+                foreground: .green,
+                help: "确认完成",
+                size: 24,
+                action: controller.confirmCompleted
+            )
         } else {
             Image(systemName: "sparkles")
                 .font(.system(size: 12, weight: .semibold))
@@ -1058,6 +1035,10 @@ private struct MessageBubble: View {
 }
 
 private struct ActionCircleButton: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var isHovering = false
+
     let systemName: String
     let tint: Color
     let foreground: Color
@@ -1072,15 +1053,44 @@ private struct ActionCircleButton: View {
                 .foregroundStyle(foreground)
                 .frame(width: size, height: size)
                 .background(tint, in: Circle())
-                .overlay { Circle().strokeBorder(Color.white.opacity(0.34), lineWidth: 1) }
+                .overlay {
+                    Circle()
+                        .fill(Color.primary.opacity(isHovering ? 0.085 : 0))
+                    Circle()
+                        .strokeBorder(
+                            Color.white.opacity(isHovering ? 0.62 : 0.34),
+                            lineWidth: isHovering ? 1.15 : 1
+                        )
+                }
+                .shadow(
+                    color: Color.black.opacity(isHovering ? 0.18 : 0),
+                    radius: isHovering ? 4 : 0,
+                    y: isHovering ? 1.5 : 0
+                )
+                .scaleEffect(isHovering ? 1.065 : 1)
+                .contentShape(Circle())
+                .animation(
+                    reduceMotion ? nil : .easeOut(duration: 0.13),
+                    value: isHovering
+                )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(StatusActionPressStyle())
+        .onHover { hovering in
+            isHovering = hovering && isEnabled
+        }
+        .onChange(of: isEnabled) {
+            if !isEnabled { isHovering = false }
+        }
         .help(help)
         .accessibilityLabel(help)
     }
 }
 
 private struct ToolbarIcon: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var isHovering = false
+
     let systemName: String
     let help: String
     var size: CGFloat = PinChatVisualMetrics.answerToolbarActionSize
@@ -1091,11 +1101,41 @@ private struct ToolbarIcon: View {
             Image(systemName: systemName)
                 .font(.system(size: 12, weight: .medium))
                 .frame(width: size, height: size)
-                .contentShape(Rectangle())
+                .background(Color.primary.opacity(isHovering ? 0.075 : 0), in: Circle())
+                .overlay {
+                    Circle()
+                        .strokeBorder(Color.white.opacity(isHovering ? 0.34 : 0), lineWidth: 0.8)
+                }
+                .scaleEffect(isHovering ? 1.055 : 1)
+                .contentShape(Circle())
+                .animation(
+                    reduceMotion ? nil : .easeOut(duration: 0.13),
+                    value: isHovering
+                )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(StatusActionPressStyle())
+        .onHover { hovering in
+            isHovering = hovering && isEnabled
+        }
+        .onChange(of: isEnabled) {
+            if !isEnabled { isHovering = false }
+        }
         .help(help)
         .accessibilityLabel(help)
+    }
+}
+
+private struct StatusActionPressStyle: ButtonStyle {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.91 : 1)
+            .brightness(configuration.isPressed ? -0.045 : 0)
+            .animation(
+                reduceMotion ? nil : .easeOut(duration: 0.085),
+                value: configuration.isPressed
+            )
     }
 }
 
@@ -1143,34 +1183,22 @@ struct SettingsView: View {
                         Text("使用 Codex 当前默认模型、人格和推理设置")
                             .foregroundStyle(.secondary)
                     }
-                }
-
-                Section("任务权限") {
-                    Picker("权限模式", selection: $model.permissionMode) {
-                        ForEach(PinChatPermissionMode.allCases) { mode in
-                            Label(mode.title, systemImage: mode.systemImage).tag(mode)
-                        }
-                    }
-                    Text(model.permissionMode.detail)
+                    LabeledContent(
+                        "任务权限",
+                        value: "\(model.codexPermissionConfiguration.title)（跟随）"
+                    )
+                    Text(model.codexPermissionConfiguration.detail)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Text("权限表示 Codex 可以使用的能力上限；简单问答不会因此自动读取文件。新选择会在下一次发送或继续对话时生效。")
+                    Text("PinChat 不单独保存权限；每次提问前都会重新读取 Codex 主应用在本机选择的权限。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    if model.permissionMode == .fullAccess {
-                        Label(
-                            "完全访问会移除 Codex 沙箱边界，请只在你信任当前任务时使用。macOS 保护目录仍可能需要“完全磁盘访问权限”。",
-                            systemImage: "exclamationmark.triangle.fill"
-                        )
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                    }
                     Button("打开完全磁盘访问设置…") {
                         controller.openFullDiskAccessSettings()
                     }
                 }
 
-                Section("PinChat 3.2") {
+                Section("PinChat 3.3") {
                     Text("点击桌宠提问；完成卡可展开回答、确认完成，或把同一任务交给 Codex 主应用继续。PinChat 不提供历史任务列表，也不接入其他 AI API。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -1180,5 +1208,6 @@ struct SettingsView: View {
         }
         .padding(8)
         .frame(minWidth: 420, idealWidth: 440, minHeight: 440, idealHeight: 510)
+        .onAppear { model.refreshCodexPermissionConfiguration() }
     }
 }

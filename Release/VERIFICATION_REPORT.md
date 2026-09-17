@@ -1,12 +1,12 @@
-# PinChat 3.2 官方式权限版验证报告
+# PinChat 3.3 Codex 权限跟随版验证报告
 
 验证日期：2026-09-17（Asia/Shanghai）
 
 ## 交付物
 
-- `PinChat.app`：macOS 14+、Apple Silicon、本机 ad-hoc 签名的可运行应用，版本 0.3.2（10）。
+- `PinChat.app`：macOS 14+、Apple Silicon、本机 ad-hoc 签名的可运行应用，版本 0.3.3（11）。
 - `PinChat-source.zip`：完整 Swift Package / Xcode 工程源码，不含 Git、构建缓存和应用产物。
-- v1.0、v1.1、v2.0、v2.1、v2.2、v2.3、v2.4、v2.5、v3.0、v3.1、v3.2 十一份只读冻结需求及各自 SHA-256 校验文件。
+- v1.0、v1.1、v2.0、v2.1、v2.2、v2.3、v2.4、v2.5、v3.0、v3.1、v3.2、v3.3 十二份只读冻结需求及各自 SHA-256 校验文件。
 - v2.1 冻结需求 SHA-256：`6636da523138b5b19b64c4889f063bc7cf687cec387ff4417e924b7e4a8d7427`。
 - v2.2 冻结需求 SHA-256：`2fb38fd3a99e5214582154f2f1ea314def43c6414e6023c50733bc1e47d5d46c`。
 - v2.3 冻结需求 SHA-256：`1165cc5dfd2048c83cf1706dfb2812ae0c58c1700dcbe6d8a8e869e4811bbbe6`。
@@ -15,15 +15,25 @@
 - v3.0 冻结需求 SHA-256：`b56450a0803b95f2d1021c41790da431770ab415424f7ab1471501d130f38d18`。
 - v3.1 冻结需求 SHA-256：`15b64a470c67eb3beb664bf4331836ee38b7826b0de358b63314132062bc2145`。
 - v3.2 冻结需求 SHA-256：`719a0d1ee6e2b8f02ae89dffef9955850ee3a02b9609723277b09447469447d1`。
+- v3.3 冻结需求 SHA-256：`4435c230208442d9b3b1a2730d6014c27fea92fd035ce789858db9b3114b68db`。
 
 ## 构建与自动测试
 
-- `swift test`：50 项测试全部通过。
+- `swift test`：51 项测试全部通过。
 - `xcodebuild -scheme PinChat -destination platform=macOS ... build`：通过。
 - Release 构建：通过。
 - `plutil -lint`：通过。
 - `codesign --verify --deep --strict`：通过。
-- v1.0 至 v3.2 全部冻结需求 SHA-256 校验：通过。
+- v1.0 至 v3.3 全部冻结需求 SHA-256 校验：通过。
+
+## Codex 权限跟随验证
+
+- 本机 Codex Desktop 的共享状态当前为 `agent-mode-by-host-id.local = full-access`，同时 `permission-selection-by-host-id:local` 为 `agent-mode / full-access`；PinChat 解析结果为“完全访问”。
+- PinChat 已移除输入框权限菜单和设置页权限选择器，不再读取或写入旧的 `pinChatPermissionModeV1` 偏好。
+- 每次展开输入框及发送前都会刷新共享状态；新建、恢复、每轮 `turn/start` 和交接前恢复使用同一配置。
+- 完全访问会同时发送 `approvalPolicy: never`、线程级 `sandbox: danger-full-access` 与轮次级 `sandboxPolicy.type: dangerFullAccess`，避免旧线程或下一轮退回工作区审批。
+- 既有两次 PinChat 实际任务记录均确认 `approval_policy = never`、`sandbox_policy.type = danger-full-access`，且没有 Codex approval/request_permissions 事件；这证明此前出现的系统授权不是 Codex 完全访问参数失效。
+- macOS TCC 仍会独立管理桌面、文稿、照片和其他应用数据；该系统层授权不能由 Codex 权限设置绕过。设置页保留“打开完全磁盘访问设置”入口。
 
 ## 真实审批链路验证
 
@@ -35,8 +45,9 @@
 
 新增测试覆盖：
 
-- “询问批准 / 自动批准 / 完全访问”到 `approvalPolicy`、`approvalsReviewer` 和 `sandbox` 的官方参数映射。
-- 新建与恢复线程均使用当前权限模式，避免旧任务继续落回固定只读配置。
+- Codex Desktop 共享状态中本机 `agent-mode` 与命名权限配置的解析，且明确以新的 permission selection 覆盖旧模式值。
+- “询问批准 / 自动审查 / 完全访问”到线程及轮次级 `approvalPolicy`、`approvalsReviewer`、`sandbox` 和 `sandboxPolicy` 的官方参数映射。
+- 新建、恢复与每轮执行均使用发送前刷新后的 Codex 权限，避免旧任务继续落回先前配置。
 - 命令审批的拒绝、允许一次与会话允许，以及数字/字符串 App Server 请求 ID。
 - 权限扩展仅回传服务端明确请求的文件和网络范围；拒绝时回传空权限并限制在当前轮次。
 
@@ -126,8 +137,9 @@
 
 ## 安全与边界
 
-- PinChat 默认采用 `approvalPolicy = on-request`、`approvalsReviewer = user` 与 `sandbox = workspace-write`；越界命令、文件修改和权限扩展由小窗请求用户决定。
-- “自动批准”使用 Codex 官方 `auto_review` reviewer；严格请求仍可回落到用户审批。“完全访问”使用 `danger-full-access + never`，必须由用户明确选择。
+- PinChat 不再定义自己的默认权限；它只读跟随 Codex Desktop 为本机 host 保存的当前权限选择，不写入或修改 Codex 配置。
+- Codex 选择“询问批准”时，越界命令、文件修改和权限扩展由小窗请求用户决定；选择“自动审查”时使用官方 `auto_review` reviewer；选择“完全访问”时使用 `danger-full-access + never`。
+- 输入框与设置页不再提供 PinChat 私有权限选择器，避免同一台机器出现两套互相矛盾的权限状态。
 - 权限表示可用能力上限，不要求模型对普通问答调用文件或命令工具；附件选择也不自动授予任意写权限。
 - 完全访问仍受 macOS TCC 和完全磁盘访问权限约束，PinChat 只提供打开系统设置的入口，不自动更改系统隐私授权。
 - 仓库和应用包不内嵌官方 WebP 二进制素材；运行时优先读取 Codex 缓存，其次读取 PinChat 缓存或下载官方资源。
