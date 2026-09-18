@@ -130,7 +130,7 @@ final class CodexAppServer: @unchecked Sendable {
                             "title": purpose == .conversation
                                 ? "PinChat"
                                 : "PinChat Activity Observer",
-                            "version": "0.3.5"
+                            "version": "0.3.11"
                         ]
                     ]
                 ) { result in
@@ -273,6 +273,7 @@ final class CodexAppServer: @unchecked Sendable {
     func readDesktopTasks(
         limit: Int = 5,
         viewedResolvedReceiptIDs: Set<String> = [],
+        acknowledgedResolvedReceiptIDs: Set<String> = [],
         trackedUnviewedThreadIDs: Set<String> = [],
         completion: @escaping @Sendable (Result<[CodexTaskActivity], Error>) -> Void
     ) {
@@ -318,6 +319,7 @@ final class CodexAppServer: @unchecked Sendable {
                     from: activities,
                     limit: limit,
                     viewedResolvedReceiptIDs: viewedResolvedReceiptIDs,
+                    acknowledgedResolvedReceiptIDs: acknowledgedResolvedReceiptIDs,
                     trackedUnviewedThreadIDs: trackedUnviewedThreadIDs
                 )))
             }
@@ -488,8 +490,10 @@ final class CodexAppServer: @unchecked Sendable {
                             return
                         }
                         let active = ActiveTurn(threadID: threadID, turnID: turnID)
-                        self.queue.async { self.activeTurn = active }
-                        onTurnStarted(active)
+                        self.queue.async {
+                            self.activeTurn = active
+                            onTurnStarted(active)
+                        }
                         completion(.success(()))
                     }
                 }
@@ -543,6 +547,32 @@ final class CodexAppServer: @unchecked Sendable {
             }
         })
         return items
+    }
+
+    static func turnSteerParameters(activeTurn: ActiveTurn, text: String) -> JSON {
+        [
+            "threadId": activeTurn.threadID,
+            "expectedTurnId": activeTurn.turnID,
+            "input": [["type": "text", "text": text]]
+        ]
+    }
+
+    func steerActiveTurn(
+        text: String,
+        completion: @escaping @Sendable (Result<Void, Error>) -> Void
+    ) {
+        queue.async { [weak self] in
+            guard let self, let turn = self.activeTurn else {
+                completion(.failure(PinChatError.server("当前任务尚未开始或已经结束。")))
+                return
+            }
+            self.sendRequest(
+                method: "turn/steer",
+                params: Self.turnSteerParameters(activeTurn: turn, text: text)
+            ) { result in
+                completion(result.map { _ in () })
+            }
+        }
     }
 
     func resolveApproval(

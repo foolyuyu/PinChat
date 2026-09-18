@@ -318,6 +318,7 @@ enum CodexTaskActivityOrdering {
         from activities: [CodexTaskActivity],
         limit: Int,
         viewedResolvedReceiptIDs: Set<String> = [],
+        acknowledgedResolvedReceiptIDs: Set<String> = [],
         trackedUnviewedThreadIDs: Set<String> = [],
         now: Date = Date()
     ) -> [CodexTaskActivity] {
@@ -331,6 +332,7 @@ enum CodexTaskActivityOrdering {
         let failures = unique.filter { $0.state == .failed }
         let resolvedReceipts = unique.filter {
             guard let receiptID = $0.resolvedReceiptID else { return false }
+            guard !acknowledgedResolvedReceiptIDs.contains(receiptID) else { return false }
             let hasBeenViewed = viewedResolvedReceiptIDs.contains(receiptID)
             let isTrackedAndUnviewed = trackedUnviewedThreadIDs.contains($0.threadID)
                 && !hasBeenViewed

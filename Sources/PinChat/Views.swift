@@ -27,7 +27,9 @@ private struct BehindWindowGlass: NSViewRepresentable {
 
 private struct CompactFloatingSurface: ViewModifier {
     let cornerRadius: CGFloat
+    let isHovered: Bool
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @ViewBuilder
     func body(content: Content) -> some View {
@@ -40,6 +42,7 @@ private struct CompactFloatingSurface: ViewModifier {
                     ),
                     in: shape
                 )
+                .overlay { hoverSheen(shape: shape) }
                 .shadow(
                     color: Color.black.opacity(colorScheme == .dark ? 0.14 : 0.045),
                     radius: 1.5,
@@ -69,18 +72,21 @@ private struct CompactFloatingSurface: ViewModifier {
                     }
                 }
                 .overlay {
-                    shape.strokeBorder(
-                        LinearGradient(
-                            colors: [
-                                Color.white.opacity(colorScheme == .dark ? 0.40 : 0.66),
-                                Color.white.opacity(colorScheme == .dark ? 0.10 : 0.18),
-                                Color.black.opacity(colorScheme == .dark ? 0.12 : 0.045)
-                            ],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        ),
-                        lineWidth: 0.8
-                    )
+                    ZStack {
+                        shape.strokeBorder(
+                            LinearGradient(
+                                colors: [
+                                    Color.white.opacity(colorScheme == .dark ? 0.40 : 0.66),
+                                    Color.white.opacity(colorScheme == .dark ? 0.10 : 0.18),
+                                    Color.black.opacity(colorScheme == .dark ? 0.12 : 0.045)
+                                ],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            ),
+                            lineWidth: 0.8
+                        )
+                        hoverSheen(shape: shape)
+                    }
                 }
                 .shadow(
                     color: Color.black.opacity(colorScheme == .dark ? 0.14 : 0.045),
@@ -94,11 +100,37 @@ private struct CompactFloatingSurface: ViewModifier {
                 )
         }
     }
+
+    private func hoverSheen(shape: RoundedRectangle) -> some View {
+        ZStack {
+            shape.fill(
+                LinearGradient(
+                    colors: [
+                        Color.white.opacity(colorScheme == .dark ? 0.055 : 0.14),
+                        Color.accentColor.opacity(colorScheme == .dark ? 0.025 : 0.035),
+                        Color.clear
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+            shape.strokeBorder(
+                Color.white.opacity(colorScheme == .dark ? 0.17 : 0.36),
+                lineWidth: 0.75
+            )
+        }
+        .opacity(isHovered ? 1 : 0)
+        .animation(
+            reduceMotion ? nil : .easeOut(duration: 0.14),
+            value: isHovered
+        )
+        .allowsHitTesting(false)
+    }
 }
 
 private extension View {
-    func compactFloatingSurface(cornerRadius: CGFloat) -> some View {
-        modifier(CompactFloatingSurface(cornerRadius: cornerRadius))
+    func compactFloatingSurface(cornerRadius: CGFloat, isHovered: Bool = false) -> some View {
+        modifier(CompactFloatingSurface(cornerRadius: cornerRadius, isHovered: isHovered))
     }
 }
 
@@ -603,6 +635,10 @@ struct MiniComposerView: View {
 struct TaskStatusCard: View {
     @ObservedObject var model: AppModel
     @ObservedObject var controller: AppController
+    @State private var hoveredDesktopTaskID: String?
+    @State private var isCardHovered = false
+    @State private var conversationFollowUpDraft = ""
+    @FocusState private var conversationFollowUpFocused: Bool
 
     private var showsDesktopActivity: Bool { controller.isDesktopActivityStatus }
     private var desktopTasks: [CodexTaskActivity] {
@@ -625,10 +661,18 @@ struct TaskStatusCard: View {
         .frame(
             height: showsDesktopActivity
                 ? PinChatVisualMetrics.desktopStatusContentHeight(taskCount: desktopTasks.count)
-                : PinChatVisualMetrics.statusContentHeight
+                : (controller.isConversationFollowUpVisible
+                    ? PinChatVisualMetrics.statusFollowUpContentHeight
+                    : PinChatVisualMetrics.statusContentHeight)
         )
-        .compactFloatingSurface(cornerRadius: 18)
-        .onHover(perform: controller.statusHoverChanged)
+        .compactFloatingSurface(
+            cornerRadius: 18,
+            isHovered: isCardHovered && showsDesktopActivity
+        )
+        .onHover { hovering in
+            isCardHovered = hovering
+            controller.statusHoverChanged(hovering)
+        }
         .padding(PinChatVisualMetrics.statusShadowOutset)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear { noteDisplayedTasksIfNeeded() }
@@ -638,6 +682,11 @@ struct TaskStatusCard: View {
         .onChange(of: model.desktopActivities) {
             controller.refreshDesktopActivityPanelLayout()
             noteDisplayedTasksIfNeeded()
+        }
+        .onChange(of: model.isGenerating) {
+            if !model.isGenerating {
+                closeConversationFollowUp()
+            }
         }
         .animation(
             .spring(response: 0.34, dampingFraction: 0.82),
@@ -651,62 +700,149 @@ struct TaskStatusCard: View {
     }
 
     private var conversationStatus: some View {
-        HStack(spacing: 8) {
-            conversationStatusGlyph
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                conversationStatusGlyph
 
-            VStack(alignment: .leading, spacing: 3) {
-                Text(conversationTitle)
-                    .font(.system(size: 14.5, weight: .semibold))
-                    .lineLimit(1)
-                Text(conversationDetail)
-                    .font(.system(size: 12.5))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(conversationTitle)
+                        .font(.system(size: 14.5, weight: .semibold))
+                        .lineLimit(1)
+                    Text(conversationDetail)
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                if model.isGenerating {
+                    ActionCircleButton(
+                        systemName: controller.isConversationFollowUpVisible
+                            ? "text.bubble.fill"
+                            : "text.bubble",
+                        tint: controller.isConversationFollowUpVisible
+                            ? Color.accentColor.opacity(0.16)
+                            : Color.primary.opacity(0.075),
+                        foreground: controller.isConversationFollowUpVisible
+                            ? Color.accentColor
+                            : .secondary,
+                        help: controller.isConversationFollowUpVisible
+                            ? "关闭补充"
+                            : "补充当前任务",
+                        action: toggleConversationFollowUp
+                    )
+                    .disabled(!model.canSteerActiveTurn)
+                    .opacity(model.canSteerActiveTurn ? 1 : 0.45)
+                    ActionCircleButton(
+                        systemName: "stop.fill",
+                        tint: .primary.opacity(0.075),
+                        foreground: .secondary,
+                        help: "停止生成",
+                        action: model.stopGenerating
+                    )
+                } else if isFailed {
+                    ActionCircleButton(
+                        systemName: "square.and.pencil",
+                        tint: .primary.opacity(0.075),
+                        foreground: .primary,
+                        help: "重新提问",
+                        action: controller.showComposer
+                    )
+                    ActionCircleButton(
+                        systemName: "checkmark",
+                        tint: Color.green.opacity(0.16),
+                        foreground: .green,
+                        help: "关闭",
+                        action: controller.confirmCompleted
+                    )
+                } else if isComplete {
+                    ActionCircleButton(
+                        systemName: "arrow.up.right",
+                        tint: .primary.opacity(0.075),
+                        foreground: .secondary,
+                        help: "在 Codex 中打开",
+                        action: controller.openCurrentConversationInCodex
+                    )
+                    ActionCircleButton(
+                        systemName: expansionSymbol,
+                        tint: .primary.opacity(0.075),
+                        foreground: .primary,
+                        help: controller.isAnswerVisible ? "折叠回答" : "展开回答",
+                        action: controller.toggleAnswer
+                    )
+                }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12)
+            .frame(height: PinChatVisualMetrics.statusContentHeight)
 
-            if model.isGenerating {
-                ActionCircleButton(
-                    systemName: "stop.fill",
-                    tint: .primary.opacity(0.075),
-                    foreground: .secondary,
-                    help: "停止生成",
-                    action: model.stopGenerating
-                )
-            } else if isFailed {
-                ActionCircleButton(
-                    systemName: "square.and.pencil",
-                    tint: .primary.opacity(0.075),
-                    foreground: .primary,
-                    help: "重新提问",
-                    action: controller.showComposer
-                )
-                ActionCircleButton(
-                    systemName: "checkmark",
-                    tint: Color.green.opacity(0.16),
-                    foreground: .green,
-                    help: "关闭",
-                    action: controller.confirmCompleted
-                )
-            } else if isComplete {
-                ActionCircleButton(
-                    systemName: "arrow.up.right",
-                    tint: .primary.opacity(0.075),
-                    foreground: .secondary,
-                    help: "在 Codex 中打开",
-                    action: controller.openCurrentConversationInCodex
-                )
-                ActionCircleButton(
-                    systemName: expansionSymbol,
-                    tint: .primary.opacity(0.075),
-                    foreground: .primary,
-                    help: controller.isAnswerVisible ? "折叠回答" : "展开回答",
-                    action: controller.toggleAnswer
-                )
+            if controller.isConversationFollowUpVisible {
+                Divider().opacity(0.35).padding(.horizontal, 12)
+                conversationFollowUpComposer
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 11)
+    }
+
+    private var conversationFollowUpComposer: some View {
+        HStack(spacing: 8) {
+            TextField("补充引导…", text: $conversationFollowUpDraft)
+                .textFieldStyle(.plain)
+                .font(.system(size: 13.5))
+                .focused($conversationFollowUpFocused)
+                .onSubmit(submitConversationFollowUp)
+            if model.isSteeringActiveTurn {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(width: 26, height: 26)
+            } else {
+                ActionCircleButton(
+                    systemName: "arrow.up",
+                    tint: canSubmitConversationFollowUp
+                        ? Color.accentColor
+                        : Color.primary.opacity(0.06),
+                    foreground: canSubmitConversationFollowUp ? .white : .secondary,
+                    help: "加入当前任务",
+                    size: 26,
+                    action: submitConversationFollowUp
+                )
+                .disabled(!canSubmitConversationFollowUp)
+            }
+        }
+        .padding(.horizontal, 13)
+        .frame(height: 44)
+    }
+
+    private var canSubmitConversationFollowUp: Bool {
+        !conversationFollowUpDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && model.canSteerActiveTurn
+            && !model.isSteeringActiveTurn
+    }
+
+    private func toggleConversationFollowUp() {
+        if controller.isConversationFollowUpVisible {
+            closeConversationFollowUp()
+        } else {
+            conversationFollowUpDraft = ""
+            controller.setConversationFollowUpVisible(true)
+            DispatchQueue.main.async { conversationFollowUpFocused = true }
+        }
+    }
+
+    private func closeConversationFollowUp() {
+        conversationFollowUpFocused = false
+        conversationFollowUpDraft = ""
+        controller.setConversationFollowUpVisible(false)
+    }
+
+    private func submitConversationFollowUp() {
+        let prompt = conversationFollowUpDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard canSubmitConversationFollowUp else { return }
+        model.steerActiveTurn(prompt) { succeeded in
+            if succeeded {
+                closeConversationFollowUp()
+            } else {
+                conversationFollowUpFocused = true
+            }
+        }
     }
 
     @ViewBuilder
@@ -759,57 +895,98 @@ struct TaskStatusCard: View {
                 .frame(height: PinChatVisualMetrics.desktopTaskRowHeight)
             } else {
                 ForEach(Array(desktopTasks.enumerated()), id: \.element.id) { index, task in
-                    desktopTaskRow(task)
+                    desktopTaskRow(
+                        task,
+                        isFirst: index == 0,
+                        isLast: index == desktopTasks.count - 1
+                    )
                     if index < desktopTasks.count - 1 {
                         Divider().padding(.leading, 46)
                     }
                 }
             }
         }
-        .padding(.vertical, 5)
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 
-    private func desktopTaskRow(_ task: CodexTaskActivity) -> some View {
-        HStack(spacing: 9) {
-            desktopStatusGlyph(task.state)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(task.title)
-                    .font(.system(size: 13.5, weight: .semibold))
-                    .lineLimit(1)
-                Text(desktopStateLabel(task.state))
-                    .font(.system(size: 11.5, weight: .medium))
-                    .foregroundStyle(desktopStateColor(task.state))
-                    .lineLimit(1)
+    private func desktopTaskRow(
+        _ task: CodexTaskActivity,
+        isFirst: Bool,
+        isLast: Bool
+    ) -> some View {
+        Button {
+            controller.openDesktopActivityInCodex(task.threadID)
+        } label: {
+            HStack(spacing: 9) {
+                desktopStatusGlyph(task)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(task.title)
+                        .font(.system(size: 13.5, weight: .semibold))
+                        .lineLimit(1)
+                    Text(desktopStateLabel(task.state))
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(desktopStateColor(task.state))
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            ActionCircleButton(
-                systemName: "arrow.up.right",
-                tint: .primary.opacity(0.075),
-                foreground: .secondary,
-                help: "在 Codex 中打开 \(task.title)",
-                size: 26
-            ) {
-                controller.openDesktopActivityInCodex(task.threadID)
+            .padding(.horizontal, 11)
+            .frame(height: PinChatVisualMetrics.desktopTaskRowHeight)
+            .padding(.top, isFirst ? 5 : 0)
+            .padding(.bottom, isLast ? 5 : 0)
+            .contentShape(Rectangle())
+            .background {
+                Rectangle().fill(
+                    Color.primary.opacity(
+                        hoveredDesktopTaskID == task.threadID ? 0.036 : 0
+                    )
+                )
             }
         }
-        .padding(.horizontal, 11)
-        .frame(height: PinChatVisualMetrics.desktopTaskRowHeight)
+        .buttonStyle(DesktopTaskPressStyle())
+        .onHover { hovering in
+            hoveredDesktopTaskID = hovering ? task.threadID : nil
+        }
+        .overlay(alignment: .leading) {
+            if task.state == .completed {
+                VStack(spacing: 0) {
+                    if isFirst { Color.clear.frame(height: 5) }
+                    ActionCircleButton(
+                        systemName: "checkmark",
+                        tint: Color.green.opacity(0.12),
+                        foreground: .green,
+                        help: "确认并收起 \(task.title)",
+                        size: 24
+                    ) {
+                        controller.acknowledgeDesktopActivity(task)
+                    }
+                    .frame(height: PinChatVisualMetrics.desktopTaskRowHeight)
+                    if isLast { Color.clear.frame(height: 5) }
+                }
+                .padding(.leading, 11)
+            }
+        }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("\(task.title)，\(desktopStateLabel(task.state))")
     }
 
     @ViewBuilder
-    private func desktopStatusGlyph(_ state: CodexTaskState) -> some View {
-        if state == .thinking {
+    private func desktopStatusGlyph(_ task: CodexTaskActivity) -> some View {
+        if task.state == .thinking {
             ProgressView()
                 .controlSize(.small)
                 .frame(width: 24, height: 24)
-        } else {
-            Image(systemName: desktopStateSymbol(state))
+        } else if task.state == .completed {
+            Image(systemName: "checkmark")
                 .font(.system(size: 11.5, weight: .semibold))
-                .foregroundStyle(desktopStateColor(state))
+                .foregroundStyle(Color.green)
                 .frame(width: 24, height: 24)
-                .background(desktopStateColor(state).opacity(0.12), in: Circle())
+                .background(Color.green.opacity(0.12), in: Circle())
+        } else {
+            Image(systemName: desktopStateSymbol(task.state))
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(desktopStateColor(task.state))
+                .frame(width: 24, height: 24)
+                .background(desktopStateColor(task.state).opacity(0.12), in: Circle())
         }
     }
 
@@ -904,17 +1081,6 @@ struct AnswerPanelView: View {
 
     private var answerToolbar: some View {
         HStack(spacing: 10) {
-            Image(systemName: "sparkles")
-                .foregroundStyle(Color.accentColor)
-            Text(model.selectedSession?.title ?? "Codex 回答")
-                .font(.system(size: 14, weight: .semibold))
-                .lineLimit(1)
-            Text(controller.answerDetached ? "自由窗口" : "已吸附")
-                .font(.caption2.weight(.medium))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 7)
-                .padding(.vertical, 3)
-                .background(Color.primary.opacity(0.055), in: Capsule())
             Spacer()
             ToolbarIcon(systemName: "square.and.pencil", help: "新建对话") {
                 controller.startNewConversation()
@@ -926,8 +1092,8 @@ struct AnswerPanelView: View {
             }
         }
         .padding(.horizontal, 17)
-        .padding(.top, 10)
-        .padding(.bottom, 9)
+        .padding(.top, 8)
+        .padding(.bottom, 7)
         .contentShape(Rectangle())
     }
 
@@ -1290,6 +1456,20 @@ private struct StatusActionPressStyle: ButtonStyle {
             .brightness(configuration.isPressed ? -0.045 : 0)
             .animation(
                 reduceMotion ? nil : .easeOut(duration: 0.085),
+                value: configuration.isPressed
+            )
+    }
+}
+
+private struct DesktopTaskPressStyle: ButtonStyle {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.992 : 1)
+            .brightness(configuration.isPressed ? -0.025 : 0)
+            .animation(
+                reduceMotion ? nil : .easeOut(duration: 0.09),
                 value: configuration.isPressed
             )
     }

@@ -62,6 +62,9 @@ struct CodexExternalHandoffLifecycle: Equatable, Sendable {
 @MainActor
 final class AppModel: ObservableObject {
     private static let viewedDesktopReceiptIDsKey = "viewedDesktopReceiptIDsV1"
+    private static let acknowledgedDesktopReceiptIDsKey = "acknowledgedDesktopReceiptIDsV1"
+    private static let pendingAcknowledgedDesktopThreadIDsKey =
+        "pendingAcknowledgedDesktopThreadIDsV1"
     private static let trackedDesktopThreadIDsKey = "trackedDesktopThreadIDsV1"
     private static let maximumRememberedDesktopReceipts = 200
 
@@ -71,6 +74,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var codexConfiguration: CodexConfiguration?
     @Published private(set) var connectionStatus: ConnectionStatus = .starting
     @Published private(set) var isGenerating = false
+    @Published private(set) var canSteerActiveTurn = false
+    @Published private(set) var isSteeringActiveTurn = false
     @Published private(set) var turnPresentation: ConversationTurnPresentation = .undetermined
     @Published private(set) var lastTurnError: String?
     @Published private(set) var desktopActivities: [CodexTaskActivity] = []
@@ -98,6 +103,9 @@ final class AppModel: ObservableObject {
     private var externalHandoffLifecycle = CodexExternalHandoffLifecycle()
     private var viewedDesktopReceiptIDs: Set<String> = []
     private var viewedDesktopReceiptOrder: [String] = []
+    private var acknowledgedDesktopReceiptIDs: Set<String> = []
+    private var acknowledgedDesktopReceiptOrder: [String] = []
+    private var pendingAcknowledgedDesktopThreadIDs: Set<String> = []
     private var trackedDesktopThreadIDs: Set<String> = []
 
     var selectedSession: ChatSession? {
@@ -144,6 +152,16 @@ final class AppModel: ObservableObject {
         ) ?? []
         viewedDesktopReceiptOrder = storedReceiptIDs
         viewedDesktopReceiptIDs = Set(storedReceiptIDs)
+        let acknowledgedReceiptIDs = UserDefaults.standard.stringArray(
+            forKey: Self.acknowledgedDesktopReceiptIDsKey
+        ) ?? []
+        acknowledgedDesktopReceiptOrder = acknowledgedReceiptIDs
+        acknowledgedDesktopReceiptIDs = Set(acknowledgedReceiptIDs)
+        pendingAcknowledgedDesktopThreadIDs = Set(
+            UserDefaults.standard.stringArray(
+                forKey: Self.pendingAcknowledgedDesktopThreadIDsKey
+            ) ?? []
+        )
         trackedDesktopThreadIDs = Set(
             UserDefaults.standard.stringArray(forKey: Self.trackedDesktopThreadIDsKey) ?? []
         )
@@ -196,6 +214,8 @@ final class AppModel: ObservableObject {
             Task { @MainActor in
                 self?.connectionStatus = .unavailable("本地服务已停止")
                 self?.isGenerating = false
+                self?.canSteerActiveTurn = false
+                self?.isSteeringActiveTurn = false
                 self?.approvalRequests.removeAll()
                 self?.lastTurnError = message
                 self?.alertMessage = message
@@ -366,6 +386,8 @@ final class AppModel: ObservableObject {
         activeAssistantMessageID = assistantMessage.id
         setTurnPresentation(.undetermined)
         isGenerating = true
+        canSteerActiveTurn = false
+        isSteeringActiveTurn = false
         sortSessionsKeepingSelection()
         persist()
 
@@ -380,7 +402,9 @@ final class AppModel: ObservableObject {
             onThreadReady: { [weak self] threadID in
                 Task { @MainActor in self?.attach(threadID: threadID, to: sessionID) }
             },
-            onTurnStarted: { _ in },
+            onTurnStarted: { [weak self] _ in
+                Task { @MainActor in self?.canSteerActiveTurn = true }
+            },
             completion: { [weak self] result in
                 if case .failure(let error) = result {
                     Task { @MainActor in self?.failPendingTurn(error.localizedDescription) }
@@ -391,9 +415,35 @@ final class AppModel: ObservableObject {
 
     func stopGenerating() {
         guard isGenerating else { return }
+        canSteerActiveTurn = false
         chatService.interruptActiveTurn { [weak self] result in
             if case .failure(let error) = result {
                 Task { @MainActor in self?.alertMessage = error.localizedDescription }
+            }
+        }
+    }
+
+    func steerActiveTurn(
+        _ rawText: String,
+        completion: @escaping @MainActor @Sendable (Bool) -> Void
+    ) {
+        let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, isGenerating, canSteerActiveTurn, !isSteeringActiveTurn else {
+            completion(false)
+            return
+        }
+        isSteeringActiveTurn = true
+        chatService.steerActiveTurn(text: text) { [weak self] result in
+            Task { @MainActor in
+                guard let self else { return }
+                self.isSteeringActiveTurn = false
+                switch result {
+                case .success:
+                    completion(true)
+                case .failure(let error):
+                    self.alertMessage = "无法补充当前任务：\(error.localizedDescription)"
+                    completion(false)
+                }
             }
         }
     }
@@ -448,6 +498,55 @@ final class AppModel: ObservableObject {
             forKey: Self.trackedDesktopThreadIDsKey
         )
         syncDesktopTasks()
+    }
+
+    @discardableResult
+    func acknowledgeDesktopActivity(_ activity: CodexTaskActivity) -> Bool {
+        guard let receiptID = activity.resolvedReceiptID else {
+            return !desktopActivities.isEmpty
+        }
+
+        rememberAcknowledgedDesktopReceipts([receiptID])
+        pendingAcknowledgedDesktopThreadIDs.remove(activity.threadID)
+        persistPendingAcknowledgedDesktopThreads()
+
+        trackedDesktopThreadIDs.remove(activity.threadID)
+        UserDefaults.standard.set(
+            trackedDesktopThreadIDs.sorted(),
+            forKey: Self.trackedDesktopThreadIDsKey
+        )
+        desktopActivities.removeAll { $0.resolvedReceiptID == receiptID }
+        syncDesktopTasks()
+        return !desktopActivities.isEmpty
+    }
+
+    /// Confirms the desktop-side completion that belongs to the current PinChat
+    /// conversation. The pending thread marker bridges the observer race where the
+    /// conversation card completes just before the activity observer sees its receipt.
+    @discardableResult
+    func acknowledgeConversationDesktopCompletion(threadID: String) -> Set<String> {
+        pendingAcknowledgedDesktopThreadIDs.insert(threadID)
+
+        let matchingActivities = desktopActivities.filter {
+            $0.threadID == threadID && $0.state == .completed
+        }
+        let receiptIDs = Set(matchingActivities.compactMap(\.resolvedReceiptID))
+        rememberAcknowledgedDesktopReceipts(receiptIDs)
+        if !receiptIDs.isEmpty {
+            pendingAcknowledgedDesktopThreadIDs.remove(threadID)
+        }
+        persistPendingAcknowledgedDesktopThreads()
+
+        trackedDesktopThreadIDs.remove(threadID)
+        UserDefaults.standard.set(
+            trackedDesktopThreadIDs.sorted(),
+            forKey: Self.trackedDesktopThreadIDsKey
+        )
+        desktopActivities.removeAll {
+            $0.threadID == threadID && $0.state == .completed
+        }
+        syncDesktopTasks()
+        return receiptIDs
     }
 
     func refreshComposerCapabilities(force: Bool = false) {
@@ -553,12 +652,33 @@ final class AppModel: ObservableObject {
         activityService.readDesktopTasks(
             limit: PinChatVisualMetrics.maximumVisibleDesktopTasks,
             viewedResolvedReceiptIDs: viewedDesktopReceiptIDs,
+            acknowledgedResolvedReceiptIDs: acknowledgedDesktopReceiptIDs,
             trackedUnviewedThreadIDs: trackedDesktopThreadIDs
         ) { [weak self] result in
             Task { @MainActor in
                 guard let self else { return }
                 self.desktopActivitySyncInFlight = false
                 if case .success(let activities) = result {
+                    let pendingMatches = activities.filter { activity in
+                        activity.state == .completed
+                            && self.pendingAcknowledgedDesktopThreadIDs.contains(
+                                activity.threadID
+                            )
+                    }
+                    if !pendingMatches.isEmpty {
+                        self.rememberAcknowledgedDesktopReceipts(
+                            Set(pendingMatches.compactMap(\.resolvedReceiptID))
+                        )
+                        self.pendingAcknowledgedDesktopThreadIDs.subtract(
+                            pendingMatches.map(\.threadID)
+                        )
+                        self.persistPendingAcknowledgedDesktopThreads()
+                    }
+
+                    let activities = activities.filter { activity in
+                        guard let receiptID = activity.resolvedReceiptID else { return true }
+                        return !self.acknowledgedDesktopReceiptIDs.contains(receiptID)
+                    }
                     let trackedBeforeSync = self.trackedDesktopThreadIDs
                     for activity in activities {
                         if activity.state.isInProgress {
@@ -578,6 +698,31 @@ final class AppModel: ObservableObject {
                 }
             }
         }
+    }
+
+    private func rememberAcknowledgedDesktopReceipts(_ receiptIDs: Set<String>) {
+        for receiptID in receiptIDs.sorted()
+        where acknowledgedDesktopReceiptIDs.insert(receiptID).inserted {
+            acknowledgedDesktopReceiptOrder.append(receiptID)
+        }
+        if acknowledgedDesktopReceiptOrder.count > Self.maximumRememberedDesktopReceipts {
+            let overflow = acknowledgedDesktopReceiptOrder.count
+                - Self.maximumRememberedDesktopReceipts
+            let removed = acknowledgedDesktopReceiptOrder.prefix(overflow)
+            acknowledgedDesktopReceiptOrder.removeFirst(overflow)
+            acknowledgedDesktopReceiptIDs.subtract(removed)
+        }
+        UserDefaults.standard.set(
+            acknowledgedDesktopReceiptOrder,
+            forKey: Self.acknowledgedDesktopReceiptIDsKey
+        )
+    }
+
+    private func persistPendingAcknowledgedDesktopThreads() {
+        UserDefaults.standard.set(
+            pendingAcknowledgedDesktopThreadIDs.sorted(),
+            forKey: Self.pendingAcknowledgedDesktopThreadIDsKey
+        )
     }
 
     private func syncCurrentConversation() {
@@ -680,6 +825,8 @@ final class AppModel: ObservableObject {
               sessions[index].codexThreadID == threadID else { return }
 
         isGenerating = false
+        canSteerActiveTurn = false
+        isSteeringActiveTurn = false
         approvalRequests.removeAll { $0.threadID == threadID }
         activeSessionID = nil
         activeAssistantMessageID = nil
@@ -699,6 +846,8 @@ final class AppModel: ObservableObject {
             removeEmptyAssistantMessage(in: index)
         }
         isGenerating = false
+        canSteerActiveTurn = false
+        isSteeringActiveTurn = false
         approvalRequests.removeAll()
         activeSessionID = nil
         activeAssistantMessageID = nil

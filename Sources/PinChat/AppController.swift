@@ -47,6 +47,19 @@ enum CodexThreadLink {
 }
 
 enum WindowPlacement {
+    static func horizontallyCollapsedFrame(
+        from frame: NSRect,
+        targetWidth: CGFloat = 8
+    ) -> NSRect {
+        let width = min(max(targetWidth, 0), frame.width)
+        return NSRect(
+            x: frame.midX - width / 2,
+            y: frame.minY,
+            width: width,
+            height: frame.height
+        )
+    }
+
     static func clamped(_ frame: NSRect, to visibleFrame: NSRect) -> NSRect {
         var result = frame
         result.size.width = min(result.width, visibleFrame.width)
@@ -177,6 +190,7 @@ enum PinChatVisualMetrics {
     static let composerActionSize: CGFloat = 26
     static let statusSurfaceWidth: CGFloat = 346
     static let statusContentHeight: CGFloat = 58
+    static let statusFollowUpContentHeight: CGFloat = 103
     static let statusShadowOutset: CGFloat = 40
     static let statusSurfaceSize = NSSize(
         width: statusSurfaceWidth,
@@ -195,6 +209,13 @@ enum PinChatVisualMetrics {
     static let attachmentGap: CGFloat = 3
     static let hoverRevealDelay: TimeInterval = 0.32
     static let hoverDismissDelay: TimeInterval = 0.20
+
+    static func conversationStatusSurfaceSize(showingFollowUp: Bool) -> NSSize {
+        NSSize(
+            width: statusSurfaceWidth,
+            height: showingFollowUp ? statusFollowUpContentHeight : statusContentHeight
+        )
+    }
 
     static func desktopStatusSize(taskCount: Int) -> NSSize {
         let surface = desktopStatusSurfaceSize(taskCount: taskCount)
@@ -250,6 +271,7 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
         }
     }
     @Published private(set) var isStatusVisible = false
+    @Published private(set) var isConversationFollowUpVisible = false
     @Published private(set) var isAnswerVisible = false {
         didSet {
             if !isAnswerVisible, activePetCaretContext == .answer {
@@ -284,12 +306,15 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
     private var petDragOffset: NSSize?
     private var codexHandoffInProgress = false
     private var screenParametersObserver: NSObjectProtocol?
+    private var applicationResignObserver: NSObjectProtocol?
+    private var outsideClickDismissTask: Task<Void, Never>?
     private var positioningPanels = false
     private var hoverRevealTask: Task<Void, Never>?
     private var hoverDismissTask: Task<Void, Never>?
     private var petHovered = false
     private var statusHovered = false
     private var panelTransitionInProgress = false
+    private var composerAnimationRevision = 0
     private var composerHasAttachments = false
     private var displayedDesktopReceiptIDs = Set<String>()
     private var activePetCaretContext: PetCaretContext?
@@ -331,6 +356,7 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
         createStatusItem()
         registerGlobalHotKey()
         observeScreenChanges()
+        observeApplicationDeactivation()
         model.start()
         updatePanelLevels()
         updatePetVisibility()
@@ -345,9 +371,14 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
         commitDisplayedDesktopReceiptsIfNeeded()
         hoverRevealTask?.cancel()
         hoverDismissTask?.cancel()
+        outsideClickDismissTask?.cancel()
         if let screenParametersObserver {
             NotificationCenter.default.removeObserver(screenParametersObserver)
             self.screenParametersObserver = nil
+        }
+        if let applicationResignObserver {
+            NotificationCenter.default.removeObserver(applicationResignObserver)
+            self.applicationResignObserver = nil
         }
         NSApp.terminate(nil)
     }
@@ -355,7 +386,9 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
     func toggleCompactWindow() {
         if isDesktopActivityStatus, isStatusVisible {
             replaceStatusWithComposer()
-        } else if isComposerVisible || isStatusVisible || isAnswerVisible {
+        } else if isComposerVisible {
+            hideComposer()
+        } else if isStatusVisible || isAnswerVisible {
             hideCompactWindow()
         } else {
             showComposer()
@@ -384,6 +417,7 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
 
     func hideCompactWindow() {
         commitDisplayedDesktopReceiptsIfNeeded()
+        isConversationFollowUpVisible = false
         isComposerVisible = false
         isStatusVisible = false
         isAnswerVisible = false
@@ -394,11 +428,14 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
     }
 
     func showComposer() {
+        outsideClickDismissTask?.cancel()
+        outsideClickDismissTask = nil
         model.restartAfterExternalHandoffIfNeeded()
         if model.isGenerating {
             showStatus()
             return
         }
+        isConversationFollowUpVisible = false
         isStatusVisible = false
         isAnswerVisible = false
         isComposerVisible = true
@@ -406,27 +443,33 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
         statusPanel?.orderOut(nil)
         answerPanel?.orderOut(nil)
         positionAttachedPanels()
-        if let composerPanel { revealHorizontally(composerPanel) }
+        if let composerPanel {
+            composerAnimationRevision += 1
+            composerPanel.alphaValue = 1
+            revealHorizontally(composerPanel)
+        }
         NSApp.activate(ignoringOtherApps: true)
     }
 
     func hideComposer() {
+        guard isComposerVisible else { return }
+        outsideClickDismissTask?.cancel()
+        outsideClickDismissTask = nil
         isComposerVisible = false
         guard let panel = composerPanel, panel.isVisible else { return }
+        composerAnimationRevision += 1
+        let revision = composerAnimationRevision
         let original = panel.frame
-        let collapsed = NSRect(
-            x: original.midX - 18,
-            y: original.minY,
-            width: 36,
-            height: original.height
-        )
+        let collapsed = WindowPlacement.horizontallyCollapsedFrame(from: original)
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.13
-            context.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            context.duration = 0.16
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             panel.animator().alphaValue = 0
             panel.animator().setFrame(collapsed, display: true)
         } completionHandler: {
             Task { @MainActor in
+                guard self.composerAnimationRevision == revision,
+                      !self.isComposerVisible else { return }
                 panel.orderOut(nil)
                 panel.alphaValue = 1
                 panel.setFrame(original, display: false)
@@ -449,6 +492,7 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
             answerWindowIsVisible: answerPanel?.isVisible == true
         )
         let keepsExpandedConversation = presentation == .expandedConversation
+        isConversationFollowUpVisible = false
         isComposerVisible = false
         isAnswerVisible = keepsExpandedConversation
         isStatusVisible = true
@@ -476,6 +520,19 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
     func refreshDesktopActivityPanelLayout() {
         guard isDesktopActivityStatus, isStatusVisible else { return }
         positionAttachedPanels(animated: true)
+    }
+
+    func setConversationFollowUpVisible(_ visible: Bool) {
+        let nextValue = visible && model.isGenerating && statusContext == .conversation
+        guard isConversationFollowUpVisible != nextValue else { return }
+        isConversationFollowUpVisible = nextValue
+        if isStatusVisible {
+            positionAttachedPanels(animated: true)
+            statusPanel?.orderFrontRegardless()
+        }
+        if nextValue {
+            NSApp.activate(ignoringOtherApps: true)
+        }
     }
 
     func captureInteractiveScreenshot(
@@ -610,6 +667,11 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
 
     func confirmCompleted() {
         if model.isGenerating { model.stopGenerating() }
+        isConversationFollowUpVisible = false
+        if let threadID = model.selectedSession?.codexThreadID {
+            let receiptIDs = model.acknowledgeConversationDesktopCompletion(threadID: threadID)
+            displayedDesktopReceiptIDs.subtract(receiptIDs)
+        }
         _ = model.newConversation()
         hideCompactWindow()
     }
@@ -695,6 +757,18 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
     func noteDesktopActivitiesDisplayed(_ activities: [CodexTaskActivity]) {
         guard isDesktopActivityStatus, isStatusVisible else { return }
         displayedDesktopReceiptIDs.formUnion(activities.compactMap(\.resolvedReceiptID))
+    }
+
+    func acknowledgeDesktopActivity(_ activity: CodexTaskActivity) {
+        guard activity.state == .completed,
+              let receiptID = activity.resolvedReceiptID else { return }
+        displayedDesktopReceiptIDs.remove(receiptID)
+        let hasRemainingActivities = model.acknowledgeDesktopActivity(activity)
+        if hasRemainingActivities {
+            refreshDesktopActivityPanelLayout()
+        } else {
+            collapseStatusPanel(completion: nil)
+        }
     }
 
     func updatePetCaret(
@@ -947,7 +1021,10 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
     }
 
     private func dismissDesktopActivityStatusIfNeeded() {
-        guard !petHovered, !statusHovered, isDesktopActivityStatus else { return }
+        guard !petHovered,
+              !statusHovered,
+              isDesktopActivityStatus,
+              !panelTransitionInProgress else { return }
         collapseStatusPanel(completion: nil)
     }
 
@@ -970,16 +1047,18 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
     private func collapseStatusPanel(
         completion: (@MainActor @Sendable () -> Void)?
     ) {
-        commitDisplayedDesktopReceiptsIfNeeded()
         guard let panel = statusPanel, panel.isVisible else {
             isStatusVisible = false
             statusContext = nil
+            commitDisplayedDesktopReceiptsIfNeeded()
             completion?()
             return
         }
         panelTransitionInProgress = true
         isStatusVisible = false
-        statusContext = nil
+        // Keep the current content alive for the entire exit animation. Clearing the
+        // context here makes a desktop-task card briefly render the conversation's
+        // completed state before the panel has actually disappeared.
         let original = panel.frame
         let collapsed = NSRect(
             x: original.midX - 18,
@@ -997,6 +1076,8 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
                 panel.orderOut(nil)
                 panel.alphaValue = 1
                 panel.setFrame(original, display: false)
+                self?.statusContext = nil
+                self?.commitDisplayedDesktopReceiptsIfNeeded()
                 self?.panelTransitionInProgress = false
                 completion?()
             }
@@ -1140,7 +1221,9 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
             ? PinChatVisualMetrics.desktopStatusSurfaceSize(
                 taskCount: model.desktopActivities.count
             )
-            : PinChatVisualMetrics.statusSurfaceSize
+            : PinChatVisualMetrics.conversationStatusSurfaceSize(
+                showingFollowUp: isConversationFollowUpVisible
+            )
         var panels: [NSPanel] = [statusPanel]
         var surfaceSizes: [NSSize] = [statusSurfaceSize]
         if isAnswerVisible, !answerDetached, let answerPanel {
@@ -1191,6 +1274,42 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
                     .forEach(self.ensureWindowIsOnScreen)
                 self.positionAttachedPanels()
             }
+        }
+    }
+
+    private func observeApplicationDeactivation() {
+        applicationResignObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didResignActiveNotification,
+            object: NSApp,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.scheduleComposerDismissAfterOutsideInteraction()
+            }
+        }
+    }
+
+    private func scheduleComposerDismissAfterOutsideInteraction() {
+        guard isComposerVisible else { return }
+        outsideClickDismissTask?.cancel()
+        outsideClickDismissTask = Task { @MainActor [weak self] in
+            // During a Finder drag the app resigns active at the initial mouse-down.
+            // Wait for the button to be released so a drop inside the composer is
+            // not mistaken for an ordinary click in another app.
+            while !Task.isCancelled, NSEvent.pressedMouseButtons != 0 {
+                try? await Task.sleep(for: .milliseconds(25))
+            }
+            guard !Task.isCancelled,
+                  let self,
+                  self.isComposerVisible else { return }
+            await Task.yield()
+            if let panel = self.composerPanel,
+               panel.frame.contains(NSEvent.mouseLocation) {
+                self.outsideClickDismissTask = nil
+                return
+            }
+            self.outsideClickDismissTask = nil
+            self.hideComposer()
         }
     }
 

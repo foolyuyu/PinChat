@@ -341,6 +341,16 @@ import UniformTypeIdentifiers
     #expect(result == NSRect(x: -1440, y: 0, width: 1440, height: 900))
 }
 
+@Test func composerCollapseKeepsItsCenterAndVerticalGeometry() {
+    let original = NSRect(x: 120, y: 240, width: 414, height: 120)
+    let collapsed = WindowPlacement.horizontallyCollapsedFrame(from: original)
+
+    #expect(collapsed.midX == original.midX)
+    #expect(collapsed.minY == original.minY)
+    #expect(collapsed.height == original.height)
+    #expect(collapsed.width == 8)
+}
+
 @Test func panelPolicySupportsNormalAndFullScreenSpaces() {
     let behavior = PanelPresentationPolicy.crossSpaceBehavior
     #expect(behavior.contains(.canJoinAllSpaces))
@@ -368,6 +378,19 @@ import UniformTypeIdentifiers
     #expect(url.scheme == "codex")
     #expect(url.host == "threads")
     #expect(url.lastPathComponent == threadID)
+}
+
+@Test func activeTurnSteeringTargetsTheCurrentTurn() throws {
+    let turn = CodexAppServer.ActiveTurn(threadID: "thread-1", turnID: "turn-1")
+    let parameters = CodexAppServer.turnSteerParameters(
+        activeTurn: turn,
+        text: "请优先检查配置文件。"
+    )
+    let input = try #require(parameters["input"] as? [[String: String]])
+
+    #expect(parameters["threadId"] as? String == "thread-1")
+    #expect(parameters["expectedTurnId"] as? String == "turn-1")
+    #expect(input == [["type": "text", "text": "请优先检查配置文件。"]])
 }
 
 @Test func codexThreadsAlwaysCarryARealWorkingDirectory() throws {
@@ -511,6 +534,38 @@ import UniformTypeIdentifiers
         now: now
     )
     #expect(historicalUntracked.isEmpty)
+}
+
+@Test func acknowledgedCompletedDesktopTaskDisappearsImmediatelyAndOnlyOnce() {
+    let now = Date()
+    let acknowledged = CodexTaskActivity(
+        threadID: "acknowledged",
+        title: "已确认任务",
+        state: .completed,
+        updatedAt: now.addingTimeInterval(-2)
+    )
+    let otherCompleted = CodexTaskActivity(
+        threadID: "other-completed",
+        title: "另一项完成任务",
+        state: .completed,
+        updatedAt: now.addingTimeInterval(-3)
+    )
+    let active = CodexTaskActivity(
+        threadID: "active",
+        title: "进行中任务",
+        state: .thinking,
+        updatedAt: now
+    )
+
+    let visible = CodexTaskActivityOrdering.visible(
+        from: [acknowledged, otherCompleted, active],
+        limit: 5,
+        acknowledgedResolvedReceiptIDs: [acknowledged.resolvedReceiptID!],
+        trackedUnviewedThreadIDs: [acknowledged.threadID, otherCompleted.threadID],
+        now: now
+    )
+
+    #expect(visible.map(\.threadID) == ["active", "other-completed"])
 }
 
 @Test func hoverTimingAvoidsAccidentalFlyoversAndVisibleGaps() {
