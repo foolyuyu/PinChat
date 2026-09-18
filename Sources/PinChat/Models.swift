@@ -311,6 +311,44 @@ struct CodexTaskActivity: Equatable, Sendable {
     }
 }
 
+enum CodexTaskActivityUnifier {
+    static func merge(
+        currentConversation: CodexTaskActivity?,
+        observed: [CodexTaskActivity],
+        limit: Int
+    ) -> [CodexTaskActivity] {
+        guard limit > 0 else { return [] }
+        var byThreadID: [String: CodexTaskActivity] = [:]
+        for activity in observed {
+            byThreadID[activity.threadID] = activity
+        }
+        if let currentConversation {
+            // The interactive channel has the freshest state while its turn is
+            // running. The observer may trail it by one polling interval.
+            byThreadID[currentConversation.threadID] = currentConversation
+        }
+        return Array(byThreadID.values.sorted { lhs, rhs in
+            if lhs.state.isInProgress != rhs.state.isInProgress {
+                return lhs.state.isInProgress
+            }
+            return lhs.updatedAt > rhs.updatedAt
+        }.prefix(limit))
+    }
+}
+
+enum CodexCompletionSignalPolicy {
+    static func hasUnseenCompletion(
+        in activities: [CodexTaskActivity],
+        seenReceiptIDs: Set<String>
+    ) -> Bool {
+        activities.contains { activity in
+            guard activity.state == .completed,
+                  let receiptID = activity.resolvedReceiptID else { return false }
+            return !seenReceiptIDs.contains(receiptID)
+        }
+    }
+}
+
 enum CodexTaskActivityOrdering {
     static let completedVisibilityDuration: TimeInterval = 30
 

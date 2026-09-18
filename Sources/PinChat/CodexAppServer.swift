@@ -130,7 +130,7 @@ final class CodexAppServer: @unchecked Sendable {
                             "title": purpose == .conversation
                                 ? "PinChat"
                                 : "PinChat Activity Observer",
-                            "version": "0.3.11"
+                            "version": "0.3.17"
                         ]
                     ]
                 ) { result in
@@ -275,6 +275,7 @@ final class CodexAppServer: @unchecked Sendable {
         viewedResolvedReceiptIDs: Set<String> = [],
         acknowledgedResolvedReceiptIDs: Set<String> = [],
         trackedUnviewedThreadIDs: Set<String> = [],
+        includedThreadIDs: Set<String> = [],
         completion: @escaping @Sendable (Result<[CodexTaskActivity], Error>) -> Void
     ) {
         sendRequest(
@@ -296,7 +297,9 @@ final class CodexAppServer: @unchecked Sendable {
                     completion(.failure(PinChatError.invalidResponse))
                     return
                 }
-                let activities = rawThreads.compactMap(Self.indexedThread).map { thread in
+                let activities = rawThreads.compactMap {
+                    Self.indexedThread($0, includedThreadIDs: includedThreadIDs)
+                }.map { thread in
                     let state = thread.rolloutPath.map {
                         self.readTaskState(
                             path: $0,
@@ -915,14 +918,19 @@ final class CodexAppServer: @unchecked Sendable {
         }
     }
 
-    private static func indexedThread(_ value: JSON) -> IndexedThread? {
+    private static func indexedThread(
+        _ value: JSON,
+        includedThreadIDs: Set<String> = []
+    ) -> IndexedThread? {
         guard let id = value["id"] as? String,
               value["parentThreadId"] is NSNull || value["parentThreadId"] == nil else {
             return nil
         }
         let originator = value["originator"] as? String
         let source = value["source"] as? String
-        guard originator == "Codex Desktop" || source == "vscode" else { return nil }
+        guard originator == "Codex Desktop"
+                || source == "vscode"
+                || includedThreadIDs.contains(id) else { return nil }
 
         let rawTitle = (value["name"] as? String).flatMap { $0.isEmpty ? nil : $0 }
             ?? (value["preview"] as? String)

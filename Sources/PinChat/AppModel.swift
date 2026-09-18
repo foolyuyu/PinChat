@@ -66,6 +66,7 @@ final class AppModel: ObservableObject {
     private static let pendingAcknowledgedDesktopThreadIDsKey =
         "pendingAcknowledgedDesktopThreadIDsV1"
     private static let trackedDesktopThreadIDsKey = "trackedDesktopThreadIDsV1"
+    private static let seenCompletionSignalReceiptIDsKey = "seenCompletionSignalReceiptIDsV1"
     private static let maximumRememberedDesktopReceipts = 200
 
     @Published private(set) var sessions: [ChatSession]
@@ -79,6 +80,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var turnPresentation: ConversationTurnPresentation = .undetermined
     @Published private(set) var lastTurnError: String?
     @Published private(set) var desktopActivities: [CodexTaskActivity] = []
+    @Published private(set) var hasUnviewedCompletionSignal = false
     @Published private(set) var composerCapabilities: [CodexComposerCapability] = []
     @Published private(set) var isLoadingComposerCapabilities = false
     @Published private(set) var composerCapabilitiesError: String?
@@ -107,13 +109,22 @@ final class AppModel: ObservableObject {
     private var acknowledgedDesktopReceiptOrder: [String] = []
     private var pendingAcknowledgedDesktopThreadIDs: Set<String> = []
     private var trackedDesktopThreadIDs: Set<String> = []
+    private var seenCompletionSignalReceiptIDs: Set<String> = []
 
     var selectedSession: ChatSession? {
         guard let selectedSessionID else { return nil }
         return sessions.first { $0.id == selectedSessionID }
     }
 
-    var desktopActivity: CodexTaskActivity? { desktopActivities.first }
+    var taskActivities: [CodexTaskActivity] {
+        CodexTaskActivityUnifier.merge(
+            currentConversation: currentConversationActivity,
+            observed: desktopActivities,
+            limit: PinChatVisualMetrics.maximumVisibleDesktopTasks
+        )
+    }
+
+    var desktopActivity: CodexTaskActivity? { taskActivities.first }
     var pendingApproval: CodexApprovalRequest? { approvalRequests.first }
 
     var latestUserText: String {
@@ -164,6 +175,11 @@ final class AppModel: ObservableObject {
         )
         trackedDesktopThreadIDs = Set(
             UserDefaults.standard.stringArray(forKey: Self.trackedDesktopThreadIDsKey) ?? []
+        )
+        seenCompletionSignalReceiptIDs = Set(
+            UserDefaults.standard.stringArray(
+                forKey: Self.seenCompletionSignalReceiptIDsKey
+            ) ?? []
         )
         let loaded = store.load().sorted { $0.updatedAt > $1.updatedAt }
         sessions = loaded
@@ -314,11 +330,12 @@ final class AppModel: ObservableObject {
     }
 
     @discardableResult
-    func newConversation() -> UUID {
+    func newConversation(forceNew: Bool = false) -> UUID {
         if isGenerating { stopGenerating() }
         setTurnPresentation(.undetermined)
         lastTurnError = nil
-        if let selectedSession,
+        if !forceNew,
+           let selectedSession,
            selectedSession.codexThreadID == nil,
            selectedSession.messages.isEmpty {
             return selectedSession.id
@@ -333,6 +350,35 @@ final class AppModel: ObservableObject {
 
     func selectSession(_ id: UUID) {
         selectedSessionID = id
+    }
+
+    @discardableResult
+    func selectSession(threadID: String) -> Bool {
+        guard let session = sessions.first(where: { $0.codexThreadID == threadID }) else {
+            return false
+        }
+        selectedSessionID = session.id
+        return true
+    }
+
+    func markCompletionSignalsSeen(for activities: [CodexTaskActivity]) {
+        let receiptIDs = Set(activities.compactMap { activity in
+            activity.state == .completed ? activity.resolvedReceiptID : nil
+        })
+        guard !receiptIDs.isEmpty else { return }
+        seenCompletionSignalReceiptIDs.formUnion(receiptIDs)
+        if seenCompletionSignalReceiptIDs.count > Self.maximumRememberedDesktopReceipts {
+            seenCompletionSignalReceiptIDs = Set(
+                seenCompletionSignalReceiptIDs.sorted().suffix(
+                    Self.maximumRememberedDesktopReceipts
+                )
+            )
+        }
+        UserDefaults.standard.set(
+            seenCompletionSignalReceiptIDs.sorted(),
+            forKey: Self.seenCompletionSignalReceiptIDsKey
+        )
+        refreshCompletionSignal(using: desktopActivities)
     }
 
     func deleteSessions(at offsets: IndexSet) {
@@ -631,6 +677,7 @@ final class AppModel: ObservableObject {
         guard let index = sessions.firstIndex(where: { $0.id == sessionID }) else { return }
         sessions[index].codexThreadID = threadID
         persist()
+        syncDesktopTasks()
     }
 
     private func startSyncLoop() {
@@ -653,7 +700,8 @@ final class AppModel: ObservableObject {
             limit: PinChatVisualMetrics.maximumVisibleDesktopTasks,
             viewedResolvedReceiptIDs: viewedDesktopReceiptIDs,
             acknowledgedResolvedReceiptIDs: acknowledgedDesktopReceiptIDs,
-            trackedUnviewedThreadIDs: trackedDesktopThreadIDs
+            trackedUnviewedThreadIDs: trackedDesktopThreadIDs,
+            includedThreadIDs: Set(sessions.compactMap(\.codexThreadID))
         ) { [weak self] result in
             Task { @MainActor in
                 guard let self else { return }
@@ -695,6 +743,7 @@ final class AppModel: ObservableObject {
                         )
                     }
                     self.desktopActivities = activities
+                    self.refreshCompletionSignal(using: activities)
                 }
             }
         }
@@ -838,6 +887,7 @@ final class AppModel: ObservableObject {
             lastTurnError = nil
         }
         persist()
+        syncDesktopTasks()
     }
 
     private func failPendingTurn(_ message: String) {
@@ -865,6 +915,26 @@ final class AppModel: ObservableObject {
 
     private func sortSessionsKeepingSelection() {
         sessions.sort { $0.updatedAt > $1.updatedAt }
+    }
+
+    private var currentConversationActivity: CodexTaskActivity? {
+        guard isGenerating,
+              let sessionID = activeSessionID,
+              let session = sessions.first(where: { $0.id == sessionID }),
+              let threadID = session.codexThreadID else { return nil }
+        return CodexTaskActivity(
+            threadID: threadID,
+            title: session.title,
+            state: pendingApproval == nil ? .thinking : .waiting,
+            updatedAt: session.updatedAt
+        )
+    }
+
+    private func refreshCompletionSignal(using activities: [CodexTaskActivity]) {
+        hasUnviewedCompletionSignal = CodexCompletionSignalPolicy.hasUnseenCompletion(
+            in: activities,
+            seenReceiptIDs: seenCompletionSignalReceiptIDs
+        )
     }
 
     private func persist() {

@@ -46,6 +46,12 @@ enum CodexThreadLink {
     }
 }
 
+enum FloatingPanelAppearancePolicy {
+    static func appearanceName(interfaceStyle: String?) -> NSAppearance.Name {
+        interfaceStyle == "Dark" ? .darkAqua : .aqua
+    }
+}
+
 enum WindowPlacement {
     static func horizontallyCollapsedFrame(
         from frame: NSRect,
@@ -57,6 +63,21 @@ enum WindowPlacement {
             y: frame.minY,
             width: width,
             height: frame.height
+        )
+    }
+
+    static func pointCollapsedFrame(
+        from frame: NSRect,
+        toward point: NSPoint,
+        size: NSSize = NSSize(width: 28, height: 28)
+    ) -> NSRect {
+        let width = min(max(size.width, 1), frame.width)
+        let height = min(max(size.height, 1), frame.height)
+        return NSRect(
+            x: point.x - width / 2,
+            y: point.y - height / 2,
+            width: width,
+            height: height
         )
     }
 
@@ -209,6 +230,13 @@ enum PinChatVisualMetrics {
     static let attachmentGap: CGFloat = 3
     static let hoverRevealDelay: TimeInterval = 0.32
     static let hoverDismissDelay: TimeInterval = 0.20
+    static let composerRevealDuration: TimeInterval = 0.30
+    static let composerCollapseDuration: TimeInterval = 0.22
+    static let floatingPanelRevealDuration: TimeInterval = 0.28
+    static let statusCollapseDuration: TimeInterval = 0.20
+    static let composerFocusDelay: TimeInterval = 0.14
+    static let answerSwitchCollapseDuration: TimeInterval = 0.24
+    static let composerOutsideDismissGraceDuration: TimeInterval = 0.55
 
     static func conversationStatusSurfaceSize(showingFollowUp: Bool) -> NSSize {
         NSSize(
@@ -217,25 +245,42 @@ enum PinChatVisualMetrics {
         )
     }
 
-    static func desktopStatusSize(taskCount: Int) -> NSSize {
-        let surface = desktopStatusSurfaceSize(taskCount: taskCount)
+    static func desktopStatusSize(
+        taskCount: Int,
+        showingFollowUp: Bool = false
+    ) -> NSSize {
+        let surface = desktopStatusSurfaceSize(
+            taskCount: taskCount,
+            showingFollowUp: showingFollowUp
+        )
         return NSSize(
             width: surface.width + statusShadowOutset * 2,
             height: surface.height + statusShadowOutset * 2
         )
     }
 
-    static func desktopStatusSurfaceSize(taskCount: Int) -> NSSize {
+    static func desktopStatusSurfaceSize(
+        taskCount: Int,
+        showingFollowUp: Bool = false
+    ) -> NSSize {
         NSSize(
             width: statusSurfaceWidth,
-            height: desktopStatusContentHeight(taskCount: taskCount)
+            height: desktopStatusContentHeight(
+                taskCount: taskCount,
+                showingFollowUp: showingFollowUp
+            )
         )
     }
 
-    static func desktopStatusContentHeight(taskCount: Int) -> CGFloat {
+    static func desktopStatusContentHeight(
+        taskCount: Int,
+        showingFollowUp: Bool = false
+    ) -> CGFloat {
         let visibleCount = max(1, min(maximumVisibleDesktopTasks, taskCount))
         let dividerHeight = CGFloat(max(0, visibleCount - 1))
+        let followUpHeight: CGFloat = showingFollowUp ? 45 : 0
         return 10 + desktopTaskRowHeight * CGFloat(visibleCount) + dividerHeight
+            + followUpHeight
     }
 }
 
@@ -308,6 +353,7 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
     private var screenParametersObserver: NSObjectProtocol?
     private var applicationResignObserver: NSObjectProtocol?
     private var outsideClickDismissTask: Task<Void, Never>?
+    private var composerOutsideDismissSuppressedUntil = Date.distantPast
     private var positioningPanels = false
     private var hoverRevealTask: Task<Void, Never>?
     private var hoverDismissTask: Task<Void, Never>?
@@ -319,6 +365,7 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
     private var displayedDesktopReceiptIDs = Set<String>()
     private var activePetCaretContext: PetCaretContext?
     private var activePetCaretScreenPoint: CGPoint?
+    private var answerSwitchInProgress = false
 
     private enum Keys {
         static let alwaysOnTop = "alwaysOnTop"
@@ -388,8 +435,8 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
             replaceStatusWithComposer()
         } else if isComposerVisible {
             hideComposer()
-        } else if isStatusVisible || isAnswerVisible {
-            hideCompactWindow()
+        } else if isStatusVisible {
+            collapseStatusPanel(completion: nil)
         } else {
             showComposer()
         }
@@ -408,7 +455,7 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
         cancelHoverTasks()
         if isComposerVisible {
             hideComposer()
-        } else if isStatusVisible, !model.isGenerating, !isAnswerVisible {
+        } else if isStatusVisible, !model.isGenerating {
             replaceStatusWithComposer()
         } else {
             showComposer()
@@ -420,11 +467,13 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
         isConversationFollowUpVisible = false
         isComposerVisible = false
         isStatusVisible = false
-        isAnswerVisible = false
         statusContext = nil
         composerPanel?.orderOut(nil)
         statusPanel?.orderOut(nil)
-        answerPanel?.orderOut(nil)
+        if isAnswerVisible {
+            positionAttachedPanels()
+            answerPanel?.orderFrontRegardless()
+        }
     }
 
     func showComposer() {
@@ -437,13 +486,16 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
         }
         isConversationFollowUpVisible = false
         isStatusVisible = false
-        isAnswerVisible = false
         isComposerVisible = true
+        composerOutsideDismissSuppressedUntil = Date().addingTimeInterval(
+            PinChatVisualMetrics.composerOutsideDismissGraceDuration
+        )
         statusContext = nil
         statusPanel?.orderOut(nil)
-        answerPanel?.orderOut(nil)
         positionAttachedPanels()
+        refreshPetLookDirection()
         if let composerPanel {
+            synchronizeAppearance(of: composerPanel)
             composerAnimationRevision += 1
             composerPanel.alphaValue = 1
             revealHorizontally(composerPanel)
@@ -462,7 +514,7 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
         let original = panel.frame
         let collapsed = WindowPlacement.horizontallyCollapsedFrame(from: original)
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.16
+            context.duration = PinChatVisualMetrics.composerCollapseDuration
             context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             panel.animator().alphaValue = 0
             panel.animator().setFrame(collapsed, display: true)
@@ -480,31 +532,26 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
     func sendMessage(
         _ text: String,
         attachments: [ChatAttachment] = [],
-        capabilities: [CodexComposerCapability] = []
+        capabilities: [CodexComposerCapability] = [],
+        startsNewConversation: Bool = false
     ) {
         guard model.account != nil else {
             showComposer()
             model.alertMessage = PinChatError.notSignedIn.localizedDescription
             return
         }
-        let presentation = ConversationSendPresentation.resolve(
-            answerIsVisible: isAnswerVisible,
-            answerWindowIsVisible: answerPanel?.isVisible == true
-        )
-        let keepsExpandedConversation = presentation == .expandedConversation
+        if startsNewConversation {
+            _ = model.newConversation(forceNew: true)
+        }
         isConversationFollowUpVisible = false
         isComposerVisible = false
-        isAnswerVisible = keepsExpandedConversation
-        isStatusVisible = true
-        statusContext = .conversation
+        isStatusVisible = false
+        statusContext = nil
         composerPanel?.orderOut(nil)
-        if !keepsExpandedConversation {
-            answerPanel?.orderOut(nil)
-        }
+        statusPanel?.orderOut(nil)
         model.send(text, attachments: attachments, capabilities: capabilities)
         positionAttachedPanels()
-        if let statusPanel { revealWithLift(statusPanel) }
-        if keepsExpandedConversation {
+        if isAnswerVisible {
             answerPanel?.orderFrontRegardless()
         }
     }
@@ -523,7 +570,7 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
     }
 
     func setConversationFollowUpVisible(_ visible: Bool) {
-        let nextValue = visible && model.isGenerating && statusContext == .conversation
+        let nextValue = visible && model.isGenerating && isStatusVisible
         guard isConversationFollowUpVisible != nextValue else { return }
         isConversationFollowUpVisible = nextValue
         if isStatusVisible {
@@ -582,7 +629,7 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
     func showStatus() {
         isComposerVisible = false
         isStatusVisible = true
-        statusContext = .conversation
+        statusContext = .desktopActivity
         composerPanel?.orderOut(nil)
         positionAttachedPanels()
         if let statusPanel, !statusPanel.isVisible {
@@ -594,13 +641,10 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
 
     private func presentApprovalRequest() {
         isComposerVisible = false
-        isStatusVisible = true
         isAnswerVisible = true
-        statusContext = .conversation
         answerAttachment = .attached
         composerPanel?.orderOut(nil)
         positionAttachedPanels()
-        statusPanel?.orderFrontRegardless()
         if let answerPanel, !answerPanel.isVisible {
             revealWithLift(answerPanel)
         } else {
@@ -611,24 +655,18 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
 
     func toggleAnswer() {
         guard !model.isGenerating, !model.latestAssistantText.isEmpty else { return }
-        if isAnswerVisible {
-            isAnswerVisible = false
-            answerPanel?.orderOut(nil)
-            positionAttachedPanels()
-        } else {
-            isStatusVisible = true
-            isAnswerVisible = true
-            statusContext = .conversation
-            answerAttachment = .attached
-            positionAttachedPanels()
-            statusPanel?.orderFrontRegardless()
-            if let answerPanel { revealWithLift(answerPanel) }
-            NSApp.activate(ignoringOtherApps: true)
+        guard !isAnswerVisible else {
+            answerPanel?.orderFrontRegardless()
+            return
         }
+        isAnswerVisible = true
+        answerAttachment = .attached
+        positionAttachedPanels()
+        if let answerPanel { revealWithLift(answerPanel) }
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     private func presentConversationTurn(_ presentation: ConversationTurnPresentation) {
-        guard statusContext == .conversation, isStatusVisible else { return }
         switch presentation {
         case .undetermined:
             break
@@ -637,19 +675,13 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
             isAnswerVisible = true
             answerAttachment = .attached
             positionAttachedPanels()
-            statusPanel?.orderFrontRegardless()
             if let answerPanel, !answerPanel.isVisible {
                 revealWithLift(answerPanel)
             } else {
                 answerPanel?.orderFrontRegardless()
             }
         case .work:
-            guard model.pendingApproval == nil else { return }
-            guard isAnswerVisible else { return }
-            isAnswerVisible = false
-            answerPanel?.orderOut(nil)
-            positionAttachedPanels(animated: true)
-            statusPanel?.orderFrontRegardless()
+            break
         }
     }
 
@@ -659,10 +691,45 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
         positionAttachedPanels()
     }
 
-    func startNewConversation() {
-        guard !model.isGenerating else { return }
-        _ = model.newConversation()
-        showComposer()
+    func startNewConversation(collapseToward target: NSPoint? = nil) {
+        guard !model.isGenerating, !answerSwitchInProgress else { return }
+        guard let target,
+              isAnswerVisible,
+              let panel = answerPanel,
+              panel.isVisible else {
+            _ = model.newConversation(forceNew: true)
+            showComposer()
+            return
+        }
+
+        answerSwitchInProgress = true
+        let originalFrame = panel.frame
+        let originalMinimumSize = panel.minSize
+        let collapsedFrame = WindowPlacement.pointCollapsedFrame(
+            from: originalFrame,
+            toward: target
+        )
+        positioningPanels = true
+        panel.minSize = NSSize(width: 1, height: 1)
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = PinChatVisualMetrics.answerSwitchCollapseDuration
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            panel.animator().alphaValue = 0
+            panel.animator().setFrame(collapsedFrame, display: true)
+        } completionHandler: { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                panel.orderOut(nil)
+                panel.alphaValue = 1
+                panel.minSize = originalMinimumSize
+                panel.setFrame(originalFrame, display: false)
+                self.positioningPanels = false
+                self.isAnswerVisible = false
+                self.answerSwitchInProgress = false
+                _ = self.model.newConversation(forceNew: true)
+                self.showComposer()
+            }
+        }
     }
 
     func confirmCompleted() {
@@ -719,6 +786,22 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
         openCodexThread(threadID)
     }
 
+    func openTaskActivity(_ activity: CodexTaskActivity) {
+        if model.selectSession(threadID: activity.threadID) {
+            if !isAnswerVisible {
+                isAnswerVisible = true
+                answerAttachment = .attached
+                positionAttachedPanels()
+                if let answerPanel { revealWithLift(answerPanel) }
+            } else {
+                answerPanel?.orderFrontRegardless()
+            }
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        openCodexThread(activity.threadID)
+    }
+
     func openDesktopActivityInCodex() {
         guard let threadID = model.desktopActivity?.threadID else { return }
         openDesktopActivityInCodex(threadID)
@@ -731,7 +814,6 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
             model.refreshDesktopActivities()
             guard !isDraggingPet,
                   !isComposerVisible,
-                  !isAnswerVisible,
                   statusContext != .conversation else { return }
             hoverRevealTask?.cancel()
             hoverRevealTask = Task { [weak self] in
@@ -756,6 +838,7 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
 
     func noteDesktopActivitiesDisplayed(_ activities: [CodexTaskActivity]) {
         guard isDesktopActivityStatus, isStatusVisible else { return }
+        model.markCompletionSignalsSeen(for: activities)
         displayedDesktopReceiptIDs.formUnion(activities.compactMap(\.resolvedReceiptID))
     }
 
@@ -821,6 +904,7 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
             cancelHoverTasks()
             if isDesktopActivityStatus {
                 commitDisplayedDesktopReceiptsIfNeeded()
+                isConversationFollowUpVisible = false
                 isStatusVisible = false
                 statusContext = nil
                 statusPanel?.orderOut(nil)
@@ -859,13 +943,17 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
     func windowDidMove(_ notification: Notification) {
         guard let window = notification.object as? NSWindow, !positioningPanels else { return }
         if window === answerPanel {
+            let wasAttached = answerAttachment == .attached
             answerAttachment = answerAttachment.afterWindowMove(isProgrammatic: false)
             saveFrame(window.frame, key: Keys.answerFrame)
+            if wasAttached, answerAttachment == .detached, isStatusVisible {
+                collapseStatusPanel(completion: nil)
+            }
         }
     }
 
     func windowDidResize(_ notification: Notification) {
-        guard let window = notification.object as? NSWindow else { return }
+        guard let window = notification.object as? NSWindow, !positioningPanels else { return }
         if window === answerPanel {
             saveFrame(window.frame, key: Keys.answerFrame)
         }
@@ -969,9 +1057,23 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
         panel.hidesOnDeactivate = false
         panel.isFloatingPanel = true
         panel.collectionBehavior = PanelPresentationPolicy.crossSpaceBehavior
+        synchronizeAppearance(of: panel)
+    }
+
+    private func synchronizeAppearance(of panel: NSPanel) {
+        panel.appearance = NSAppearance(
+            named: FloatingPanelAppearancePolicy.appearanceName(
+                interfaceStyle: UserDefaults.standard.string(
+                    forKey: "AppleInterfaceStyle"
+                )
+            )
+        )
+        panel.contentView?.appearance = panel.appearance
+        panel.contentView?.needsDisplay = true
     }
 
     private func revealHorizontally(_ panel: NSPanel) {
+        synchronizeAppearance(of: panel)
         let target = panel.frame
         guard !panel.isVisible else {
             panel.makeKeyAndOrderFront(nil)
@@ -987,7 +1089,7 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
         panel.setFrame(collapsed, display: true)
         panel.makeKeyAndOrderFront(nil)
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.17
+            context.duration = PinChatVisualMetrics.composerRevealDuration
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
             panel.animator().alphaValue = 1
             panel.animator().setFrame(target, display: true)
@@ -998,7 +1100,6 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
         guard petHovered,
               !panelTransitionInProgress,
               !isComposerVisible,
-              !isAnswerVisible,
               statusContext != .conversation else { return }
         statusContext = .desktopActivity
         isStatusVisible = true
@@ -1048,9 +1149,11 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
         completion: (@MainActor @Sendable () -> Void)?
     ) {
         guard let panel = statusPanel, panel.isVisible else {
+            isConversationFollowUpVisible = false
             isStatusVisible = false
             statusContext = nil
             commitDisplayedDesktopReceiptsIfNeeded()
+            if isAnswerVisible { positionAttachedPanels() }
             completion?()
             return
         }
@@ -1067,7 +1170,7 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
             height: original.height
         )
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.13
+            context.duration = PinChatVisualMetrics.statusCollapseDuration
             context.timingFunction = CAMediaTimingFunction(name: .easeIn)
             panel.animator().alphaValue = 0
             panel.animator().setFrame(collapsed, display: true)
@@ -1076,9 +1179,11 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
                 panel.orderOut(nil)
                 panel.alphaValue = 1
                 panel.setFrame(original, display: false)
+                self?.isConversationFollowUpVisible = false
                 self?.statusContext = nil
                 self?.commitDisplayedDesktopReceiptsIfNeeded()
                 self?.panelTransitionInProgress = false
+                if self?.isAnswerVisible == true { self?.positionAttachedPanels() }
                 completion?()
             }
         }
@@ -1106,6 +1211,7 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
     }
 
     private func revealWithLift(_ panel: NSPanel, makeKey: Bool = true) {
+        synchronizeAppearance(of: panel)
         let target = panel.frame
         guard !panel.isVisible else {
             panel.orderFrontRegardless()
@@ -1123,7 +1229,7 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
             panel.orderFrontRegardless()
         }
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.22
+            context.duration = PinChatVisualMetrics.floatingPanelRevealDuration
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
             panel.animator().alphaValue = 1
             panel.animator().setFrame(target, display: true)
@@ -1216,10 +1322,34 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
             return
         }
 
-        guard isStatusVisible, let statusPanel else { return }
+        if !isStatusVisible {
+            guard isAnswerVisible,
+                  !answerDetached,
+                  let answerPanel else { return }
+            expansionDirection = WindowPlacement.preferredAttachmentDirection(
+                anchor: petPanel.frame,
+                in: visible,
+                requiredHeight: answerPanel.frame.height,
+                gap: PinChatVisualMetrics.attachmentGap
+            )
+            guard let frame = WindowPlacement.stackedFrames(
+                sizes: [answerPanel.frame.size],
+                attachedTo: petPanel.frame,
+                in: visible,
+                direction: expansionDirection,
+                gap: PinChatVisualMetrics.attachmentGap
+            ).first else { return }
+            positioningPanels = true
+            answerPanel.setFrame(frame, display: true, animate: animated)
+            positioningPanels = false
+            return
+        }
+
+        guard let statusPanel else { return }
         let statusSurfaceSize = isDesktopActivityStatus
             ? PinChatVisualMetrics.desktopStatusSurfaceSize(
-                taskCount: model.desktopActivities.count
+                taskCount: model.taskActivities.count,
+                showingFollowUp: isConversationFollowUpVisible
             )
             : PinChatVisualMetrics.conversationStatusSurfaceSize(
                 showingFollowUp: isConversationFollowUpVisible
@@ -1290,7 +1420,8 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
     }
 
     private func scheduleComposerDismissAfterOutsideInteraction() {
-        guard isComposerVisible else { return }
+        guard isComposerVisible,
+              Date() >= composerOutsideDismissSuppressedUntil else { return }
         outsideClickDismissTask?.cancel()
         outsideClickDismissTask = Task { @MainActor [weak self] in
             // During a Finder drag the app resigns active at the initial mouse-down.
@@ -1323,17 +1454,36 @@ final class AppController: NSObject, ObservableObject, NSWindowDelegate {
     private func refreshPetLookDirection() {
         guard let panel = petPanel,
               floatingButtonEnabled,
-              !isDraggingPet,
-              let context = activePetCaretContext,
-              caretContextIsVisible(context),
-              let caretPoint = activePetCaretScreenPoint else {
+              !isDraggingPet else {
+            petLookDirection = nil
+            return
+        }
+
+        let lookTarget: CGPoint?
+        if let context = activePetCaretContext,
+           caretContextIsVisible(context),
+           let caretPoint = activePetCaretScreenPoint {
+            lookTarget = caretPoint
+        } else if isComposerVisible, let composerPanel {
+            // The official overlay first looks toward the quick-chat surface
+            // while its layout/focus settles, then turns toward the real text
+            // insertion caret once that point is available.
+            lookTarget = CGPoint(x: composerPanel.frame.midX, y: composerPanel.frame.midY)
+        } else {
+            lookTarget = nil
+        }
+
+        guard let lookTarget else {
             petLookDirection = nil
             return
         }
         let direction = PetLookDirection.resolve(
             mascotCenter: CGPoint(x: panel.frame.midX, y: panel.frame.midY),
-            target: caretPoint
+            target: lookTarget
         )
+        // Match the official overlay: the low-head pose is selected directly
+        // from the live insertion-caret position. It does not rotate through
+        // every intermediate compass frame.
         if petLookDirection != direction { petLookDirection = direction }
     }
 

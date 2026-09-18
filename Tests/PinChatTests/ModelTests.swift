@@ -351,6 +351,35 @@ import UniformTypeIdentifiers
     #expect(collapsed.width == 8)
 }
 
+@Test func answerSwitchCollapsesIntoTheToolbarClickPoint() {
+    let original = NSRect(x: 100, y: 200, width: 520, height: 420)
+    let clickPoint = NSPoint(x: 570, y: 590)
+    let collapsed = WindowPlacement.pointCollapsedFrame(
+        from: original,
+        toward: clickPoint
+    )
+
+    #expect(collapsed.size == NSSize(width: 28, height: 28))
+    #expect(collapsed.midX == clickPoint.x)
+    #expect(collapsed.midY == clickPoint.y)
+    #expect(PinChatVisualMetrics.answerSwitchCollapseDuration == 0.24)
+}
+
+@Test func floatingPanelsUseTheSystemInterfaceStyleInsteadOfBackdropDrift() {
+    #expect(FloatingPanelAppearancePolicy.appearanceName(interfaceStyle: nil) == .aqua)
+    #expect(FloatingPanelAppearancePolicy.appearanceName(interfaceStyle: "Light") == .aqua)
+    #expect(FloatingPanelAppearancePolicy.appearanceName(interfaceStyle: "Dark") == .darkAqua)
+}
+
+@Test func interactionPolishUsesDeliberateAnimationTiming() {
+    #expect(PinChatVisualMetrics.composerRevealDuration == 0.30)
+    #expect(PinChatVisualMetrics.composerCollapseDuration == 0.22)
+    #expect(PinChatVisualMetrics.floatingPanelRevealDuration == 0.28)
+    #expect(PinChatVisualMetrics.statusCollapseDuration == 0.20)
+    #expect(PinChatVisualMetrics.composerFocusDelay == 0.14)
+    #expect(PinChatVisualMetrics.composerOutsideDismissGraceDuration == 0.55)
+}
+
 @Test func panelPolicySupportsNormalAndFullScreenSpaces() {
     let behavior = PanelPresentationPolicy.crossSpaceBehavior
     #expect(behavior.contains(.canJoinAllSpaces))
@@ -483,6 +512,59 @@ import UniformTypeIdentifiers
     let visible = CodexTaskActivityOrdering.visible(from: activities, limit: 3, now: now)
     #expect(visible.map(\.threadID) == ["waiting", "thinking", "completed-newest"])
     #expect(visible.map(\.state) == [.waiting, .thinking, .completed])
+}
+
+@Test func unifiedTaskListUsesFreshInteractiveStateWithoutDuplicatingThread() {
+    let now = Date()
+    let observed = [
+        CodexTaskActivity(
+            threadID: "pinchat-thread",
+            title: "旧观察状态",
+            state: .completed,
+            updatedAt: now.addingTimeInterval(-2)
+        ),
+        CodexTaskActivity(
+            threadID: "desktop-thread",
+            title: "桌面任务",
+            state: .thinking,
+            updatedAt: now.addingTimeInterval(-1)
+        )
+    ]
+    let interactive = CodexTaskActivity(
+        threadID: "pinchat-thread",
+        title: "PinChat 新任务",
+        state: .thinking,
+        updatedAt: now
+    )
+
+    let merged = CodexTaskActivityUnifier.merge(
+        currentConversation: interactive,
+        observed: observed,
+        limit: 5
+    )
+
+    #expect(merged.count == 2)
+    #expect(merged.first == interactive)
+    #expect(merged.filter { $0.threadID == "pinchat-thread" }.count == 1)
+}
+
+@Test func completionSignalPersistsUntilItsReceiptIsActuallySeen() throws {
+    let completed = CodexTaskActivity(
+        threadID: "finished-thread",
+        title: "已完成",
+        state: .completed,
+        updatedAt: Date(timeIntervalSinceReferenceDate: 42)
+    )
+    let receiptID = try #require(completed.resolvedReceiptID)
+
+    #expect(CodexCompletionSignalPolicy.hasUnseenCompletion(
+        in: [completed],
+        seenReceiptIDs: []
+    ))
+    #expect(!CodexCompletionSignalPolicy.hasUnseenCompletion(
+        in: [completed],
+        seenReceiptIDs: [receiptID]
+    ))
 }
 
 @Test func completedDesktopTasksWaitForViewingAndMinimumAge() {
@@ -754,8 +836,24 @@ import UniformTypeIdentifiers
     #expect(PetAnimation.resolve(isDragging: true, isGenerating: true, hasError: false, hasAnswer: false) == .jumping)
     #expect(PetAnimation.resolve(isDragging: false, isGenerating: true, hasError: false, hasAnswer: false) == .working)
     #expect(PetAnimation.resolve(isDragging: false, isGenerating: false, hasError: true, hasAnswer: false) == .failed)
-    #expect(PetAnimation.resolve(isDragging: false, isGenerating: false, hasError: false, hasAnswer: true) == .waving)
+    #expect(PetAnimation.resolve(isDragging: false, isGenerating: false, hasError: false, hasAnswer: true) == .idle)
     #expect(PetAnimation.resolve(isDragging: false, isGenerating: false, hasError: false, hasAnswer: false) == .idle)
+    #expect(PetAnimation.resolve(
+        isDragging: false,
+        isGenerating: false,
+        hasError: false,
+        hasAnswer: false,
+        hasCompletionSignal: true
+    ) == .review)
+}
+
+@Test func petIdleUsesOfficialSlowTimingAndStartsStill() {
+    #expect(PetAnimation.idle.frameIndex(elapsed: 0, frameCount: 6) == 0)
+    #expect(PetAnimation.idle.frameIndex(elapsed: 1.67, frameCount: 6) == 0)
+    #expect(PetAnimation.idle.frameIndex(elapsed: 1.68, frameCount: 6) == 1)
+    #expect(PetAnimation.idle.frameIndex(elapsed: 2.35, frameCount: 6) == 2)
+    #expect(PetAnimation.idle.frameIndex(elapsed: 6.59, frameCount: 6) == 5)
+    #expect(PetAnimation.idle.frameIndex(elapsed: 6.60, frameCount: 6) == 0)
 }
 
 @Test func petLookDirectionMatchesOfficialSixteenWayCompass() throws {

@@ -17,9 +17,35 @@ enum PetAnimation: Int, CaseIterable, Sendable {
         switch self {
         case .idle: 0.22
         case .working, .runningLeft, .runningRight: 0.09
-        case .waving, .jumping: 0.11
+        case .waving: 0.22
+        case .jumping: 0.11
         case .failed, .waiting, .review: 0.14
         }
+    }
+
+    var timelineRefreshInterval: TimeInterval {
+        self == .idle ? 0.10 : frameInterval
+    }
+
+    func frameIndex(elapsed: TimeInterval, frameCount: Int) -> Int {
+        guard frameCount > 1 else { return 0 }
+        if self == .idle {
+            // Official Codex v2 idle timing: 280/110/110/140/140/320 ms,
+            // slowed by its idle multiplier of 6. The long first frame keeps
+            // returning from a caret-facing pose calm instead of looking like
+            // a one-off jump.
+            let officialDurations: [TimeInterval] = [1.68, 0.66, 0.66, 0.84, 0.84, 1.92]
+            let durations = Array(officialDurations.prefix(frameCount))
+            guard !durations.isEmpty else { return 0 }
+            let cycleDuration = durations.reduce(0, +)
+            var position = max(0, elapsed).truncatingRemainder(dividingBy: cycleDuration)
+            for (index, duration) in durations.enumerated() {
+                if position < duration { return index }
+                position -= duration
+            }
+            return durations.count - 1
+        }
+        return Int(max(0, elapsed) / frameInterval) % frameCount
     }
 
     var allowsDirectionalPose: Bool {
@@ -35,12 +61,17 @@ enum PetAnimation: Int, CaseIterable, Sendable {
         isDragging: Bool,
         isGenerating: Bool,
         hasError: Bool,
-        hasAnswer: Bool
+        hasAnswer: Bool,
+        hasCompletionSignal: Bool = false
     ) -> PetAnimation {
         if isDragging { return .jumping }
         if isGenerating { return .working }
         if hasError { return .failed }
-        if hasAnswer { return .waving }
+        if hasCompletionSignal { return .review }
+        // A stored answer is persistent session state, not a fresh completion
+        // event. Keeping the mascot in `waving` here made every subsequent idle
+        // period look like a permanent, fast notification animation.
+        _ = hasAnswer
         return .idle
     }
 }
@@ -226,10 +257,9 @@ final class PetSpriteStore: ObservableObject {
         Task { await load() }
     }
 
-    func frame(for animation: PetAnimation, at date: Date) -> NSImage? {
+    func frame(for animation: PetAnimation, elapsed: TimeInterval) -> NSImage? {
         guard let images = frames[animation], !images.isEmpty else { return nil }
-        let tick = Int(date.timeIntervalSinceReferenceDate / animation.frameInterval)
-        return images[tick % images.count]
+        return images[animation.frameIndex(elapsed: elapsed, frameCount: images.count)]
     }
 
     func frame(for direction: PetLookDirection) -> NSImage? {
@@ -395,13 +425,7 @@ struct PetSpriteView: View {
                let image = store.frame(for: lookDirection) {
                 spriteImage(image)
             } else {
-                TimelineView(.animation(minimumInterval: animation.frameInterval)) { context in
-                    if let image = store.frame(for: animation, at: context.date) {
-                        spriteImage(image)
-                    } else {
-                        FallbackCodexPet(animation: animation)
-                    }
-                }
+                AnimatedPetSprite(store: store, animation: animation)
             }
         }
     }
@@ -411,6 +435,31 @@ struct PetSpriteView: View {
             .resizable()
             .interpolation(.none)
             .aspectRatio(192.0 / 208.0, contentMode: .fit)
+    }
+}
+
+private struct AnimatedPetSprite: View {
+    @ObservedObject var store: PetSpriteStore
+    let animation: PetAnimation
+    @State private var startedAt = Date()
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: animation.timelineRefreshInterval)) { context in
+            if let image = store.frame(
+                for: animation,
+                elapsed: context.date.timeIntervalSince(startedAt)
+            ) {
+                Image(nsImage: image)
+                    .resizable()
+                    .interpolation(.none)
+                    .aspectRatio(192.0 / 208.0, contentMode: .fit)
+            } else {
+                FallbackCodexPet(animation: animation)
+            }
+        }
+        .onChange(of: animation) {
+            startedAt = Date()
+        }
     }
 }
 

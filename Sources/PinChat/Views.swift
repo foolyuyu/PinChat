@@ -36,9 +36,18 @@ private struct CompactFloatingSurface: ViewModifier {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         if #available(macOS 26.0, *) {
             content
+                .background {
+                    ZStack {
+                        BehindWindowGlass(material: .popover, opacity: 0.96)
+                            .clipShape(shape)
+                        shape.fill(
+                            Color.white.opacity(colorScheme == .dark ? 0.12 : 0.18)
+                        )
+                    }
+                }
                 .glassEffect(
                     .regular.tint(
-                        Color.white.opacity(colorScheme == .dark ? 0.06 : 0.12)
+                        Color.white.opacity(colorScheme == .dark ? 0.11 : 0.16)
                     ),
                     in: shape
                 )
@@ -366,9 +375,10 @@ struct PetRootView: View {
         PetAnimation.resolve(
             isDragging: controller.isDraggingPet,
             isGenerating: model.isGenerating
-                || model.desktopActivities.contains(where: { $0.state.isInProgress }),
+                || model.taskActivities.contains(where: { $0.state.isInProgress }),
             hasError: model.lastTurnError != nil,
-            hasAnswer: !model.latestAssistantText.isEmpty
+            hasAnswer: !model.latestAssistantText.isEmpty,
+            hasCompletionSignal: model.hasUnviewedCompletionSignal
         )
     }
 
@@ -398,7 +408,11 @@ struct PetRootView: View {
             alignment: .center
         )
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("打开 PinChat")
+        .accessibilityLabel(
+            model.hasUnviewedCompletionSignal
+                ? "PinChat 有已完成的任务"
+                : "打开 PinChat"
+        )
     }
 }
 
@@ -425,7 +439,9 @@ struct MiniComposerView: View {
                     .font(.system(size: 13, weight: .regular))
                     .lineLimit(1...2)
                     .focused($focused)
-                    .disabled(!model.canSend || model.isGenerating)
+                    // Drafting remains available while the local Codex service
+                    // connects. Submission still waits for `canSubmit` below.
+                    .disabled(model.isGenerating)
                     .onSubmit(send)
                     .background {
                         CaretScreenPositionReader { point in
@@ -581,7 +597,13 @@ struct MiniComposerView: View {
     }
 
     private func focusSoon() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { focused = true }
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + PinChatVisualMetrics.composerFocusDelay
+        ) {
+            // Let the expanding surface establish its initial centered target
+            // before the mascot begins following the insertion caret.
+            focused = true
+        }
     }
 
     private var canSubmit: Bool {
@@ -627,7 +649,8 @@ struct MiniComposerView: View {
         attachments = []
         controller.sendMessage(
             text,
-            attachments: selectedAttachments
+            attachments: selectedAttachments,
+            startsNewConversation: true
         )
     }
 }
@@ -642,7 +665,7 @@ struct TaskStatusCard: View {
 
     private var showsDesktopActivity: Bool { controller.isDesktopActivityStatus }
     private var desktopTasks: [CodexTaskActivity] {
-        Array(model.desktopActivities.prefix(PinChatVisualMetrics.maximumVisibleDesktopTasks))
+        model.taskActivities
     }
     private var isFailed: Bool { model.lastTurnError != nil }
     private var isComplete: Bool {
@@ -660,7 +683,10 @@ struct TaskStatusCard: View {
         .frame(width: PinChatVisualMetrics.statusSurfaceWidth)
         .frame(
             height: showsDesktopActivity
-                ? PinChatVisualMetrics.desktopStatusContentHeight(taskCount: desktopTasks.count)
+                ? PinChatVisualMetrics.desktopStatusContentHeight(
+                    taskCount: desktopTasks.count,
+                    showingFollowUp: controller.isConversationFollowUpVisible
+                )
                 : (controller.isConversationFollowUpVisible
                     ? PinChatVisualMetrics.statusFollowUpContentHeight
                     : PinChatVisualMetrics.statusContentHeight)
@@ -679,7 +705,7 @@ struct TaskStatusCard: View {
         .onChange(of: controller.statusContext) {
             noteDisplayedTasksIfNeeded()
         }
-        .onChange(of: model.desktopActivities) {
+        .onChange(of: model.taskActivities) {
             controller.refreshDesktopActivityPanelLayout()
             noteDisplayedTasksIfNeeded()
         }
@@ -690,7 +716,7 @@ struct TaskStatusCard: View {
         }
         .animation(
             .spring(response: 0.34, dampingFraction: 0.82),
-            value: model.desktopActivities
+            value: model.taskActivities
         )
     }
 
@@ -900,8 +926,13 @@ struct TaskStatusCard: View {
                         isFirst: index == 0,
                         isLast: index == desktopTasks.count - 1
                     )
+                    if isCurrentInteractiveTask(task),
+                       controller.isConversationFollowUpVisible {
+                        taskSeparator
+                        conversationFollowUpComposer
+                    }
                     if index < desktopTasks.count - 1 {
-                        Divider().padding(.leading, 46)
+                        taskSeparator
                     }
                 }
             }
@@ -915,7 +946,7 @@ struct TaskStatusCard: View {
         isLast: Bool
     ) -> some View {
         Button {
-            controller.openDesktopActivityInCodex(task.threadID)
+            controller.openTaskActivity(task)
         } label: {
             HStack(spacing: 9) {
                 desktopStatusGlyph(task)
@@ -930,7 +961,8 @@ struct TaskStatusCard: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(.horizontal, 11)
+            .padding(.leading, 11)
+            .padding(.trailing, showsTaskActions(task) ? 76 : 11)
             .frame(height: PinChatVisualMetrics.desktopTaskRowHeight)
             .padding(.top, isFirst ? 5 : 0)
             .padding(.bottom, isLast ? 5 : 0)
@@ -967,7 +999,87 @@ struct TaskStatusCard: View {
                 .padding(.leading, 11)
             }
         }
+        .overlay(alignment: .trailing) {
+            if showsTaskActions(task) {
+                HStack(spacing: 5) {
+                    ActionCircleButton(
+                        systemName: controller.isConversationFollowUpVisible
+                            ? "text.bubble.fill"
+                            : "text.bubble",
+                        tint: controller.isConversationFollowUpVisible
+                            ? Color.accentColor.opacity(0.16)
+                            : Color.primary.opacity(0.075),
+                        foreground: controller.isConversationFollowUpVisible
+                            ? Color.accentColor
+                            : .secondary,
+                        help: controller.isConversationFollowUpVisible
+                            ? "关闭补充"
+                            : (isCurrentInteractiveTask(task)
+                                ? "补充当前任务"
+                                : "在 Codex 中补充当前任务"),
+                        size: 26,
+                        action: {
+                            if isCurrentInteractiveTask(task) {
+                                toggleConversationFollowUp()
+                            } else {
+                                controller.openTaskActivity(task)
+                            }
+                        }
+                    )
+                    .disabled(
+                        isCurrentInteractiveTask(task) && !model.canSteerActiveTurn
+                    )
+                    .opacity(
+                        isCurrentInteractiveTask(task) && !model.canSteerActiveTurn
+                            ? 0.45
+                            : 1
+                    )
+                    ActionCircleButton(
+                        systemName: "stop.fill",
+                        tint: .primary.opacity(0.075),
+                        foreground: .secondary,
+                        help: isCurrentInteractiveTask(task)
+                            ? "停止生成"
+                            : "在 Codex 中停止任务",
+                        size: 26,
+                        action: {
+                            if isCurrentInteractiveTask(task) {
+                                model.stopGenerating()
+                            } else {
+                                controller.openTaskActivity(task)
+                            }
+                        }
+                    )
+                }
+                .padding(.trailing, 10)
+            }
+        }
         .accessibilityElement(children: .contain)
+    }
+
+    private func isCurrentInteractiveTask(_ task: CodexTaskActivity) -> Bool {
+        model.isGenerating
+            && model.selectedSession?.codexThreadID == task.threadID
+    }
+
+    private func showsTaskActions(_ task: CodexTaskActivity) -> Bool {
+        task.state.isInProgress
+    }
+
+    private var taskSeparator: some View {
+        LinearGradient(
+            colors: [
+                Color.clear,
+                Color.primary.opacity(0.10),
+                Color.primary.opacity(0.10),
+                Color.clear
+            ],
+            startPoint: .leading,
+            endPoint: .trailing
+        )
+        .frame(height: 0.5)
+        .padding(.horizontal, 18)
+        .accessibilityHidden(true)
     }
 
     @ViewBuilder
@@ -1084,7 +1196,7 @@ struct AnswerPanelView: View {
         HStack(spacing: 10) {
             Spacer()
             ToolbarIcon(systemName: "square.and.pencil", help: "新建对话") {
-                controller.startNewConversation()
+                controller.startNewConversation(collapseToward: NSEvent.mouseLocation)
             }
             .disabled(model.isGenerating)
             .opacity(model.isGenerating ? 0.45 : 1)
