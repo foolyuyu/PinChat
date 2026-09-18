@@ -16,7 +16,9 @@ concurrency:
 jobs:
   test:
     name: Swift tests
-    runs-on: macos-15
+    # The app still targets macOS 14, but its availability-gated Liquid Glass
+    # branch must be compiled with the macOS 26 SDK.
+    runs-on: macos-26
     timeout-minutes: 15
     steps:
       - name: Check out repository
