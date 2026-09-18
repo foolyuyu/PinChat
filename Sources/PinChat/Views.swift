@@ -950,7 +950,7 @@ struct TaskStatusCard: View {
         .overlay(alignment: .leading) {
             if task.state == .completed {
                 VStack(spacing: 0) {
-                    if isFirst { Color.clear.frame(height: 5) }
+                    if isFirst { Color.clear.frame(width: 24, height: 5) }
                     ActionCircleButton(
                         systemName: "checkmark",
                         tint: Color.green.opacity(0.12),
@@ -961,8 +961,9 @@ struct TaskStatusCard: View {
                         controller.acknowledgeDesktopActivity(task)
                     }
                     .frame(height: PinChatVisualMetrics.desktopTaskRowHeight)
-                    if isLast { Color.clear.frame(height: 5) }
+                    if isLast { Color.clear.frame(width: 24, height: 5) }
                 }
+                .frame(width: 24)
                 .padding(.leading, 11)
             }
         }
