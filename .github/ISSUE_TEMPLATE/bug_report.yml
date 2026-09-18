@@ -1,0 +1,64 @@
+name: Bug report
+description: Report reproducible incorrect behavior in PinChat
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve PinChat. Remove personal prompts, account details, file contents, usernames, and local paths before submitting. Security vulnerabilities belong in a private security advisory, not a public Issue.
+  - type: input
+    id: version
+    attributes:
+      label: PinChat version or commit
+      placeholder: 0.3.17 or a commit hash
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version and Mac model
+      placeholder: macOS 15.x, Apple Silicon
+    validations:
+      required: true
+  - type: input
+    id: codex
+    attributes:
+      label: Codex or ChatGPT Desktop version
+      description: Include this when the issue concerns login, tasks, permissions, or handoff.
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open…
+        2. Click…
+        3. Observe…
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: media
+    attributes:
+      label: Screenshots or recording
+      description: Optional. Redact all personal information first.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety checks
+      options:
+        - label: I removed personal data, credentials, prompts, and sensitive file paths.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true

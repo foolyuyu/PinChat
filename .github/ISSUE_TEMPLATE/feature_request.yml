@@ -1,0 +1,38 @@
+name: Feature request
+description: Suggest an improvement to PinChat
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Describe the workflow or friction before proposing a specific UI.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed experience
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Area
+      options:
+        - Floating composer
+        - Desktop pet
+        - Task status
+        - Answer window
+        - Codex integration
+        - Attachments
+        - Accessibility
+        - Packaging or documentation
+        - Other
+    validations:
+      required: true

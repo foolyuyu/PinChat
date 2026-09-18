@@ -1,6 +1,67 @@
-# PinChat 3.17 回答窗切换动画版
+# PinChat — macOS Codex 置顶小窗与桌面助手
 
-PinChat 是一个 macOS 原生 Codex 桌宠伴随组件，不是另一套聊天主应用。它通过本机 Codex App Server 和官方 ChatGPT 登录使用用户的 Free、Plus、Pro 或工作区额度，不需要 API Key，并继承本机 Codex 的默认模型、推理强度和人格。
+> Native macOS floating window, quick chat, desktop pet and task monitor for Codex.
+
+[![macOS 14+](https://img.shields.io/badge/macOS-14%2B-000000?logo=apple)](https://www.apple.com/macos/)
+[![Swift 6](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)](https://www.swift.org/)
+[![CI](https://github.com/foolyuyu/PinChat/actions/workflows/ci.yml/badge.svg)](https://github.com/foolyuyu/PinChat/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+![Status](https://img.shields.io/badge/status-development_preview-7C3AED)
+
+[简体中文](README.md) · [English](README.en.md)
+
+PinChat 是一个面向 **Codex Desktop / ChatGPT macOS** 的原生置顶小窗与桌宠伴随组件。它让你不必频繁切换窗口，就能快速提问、查看简单回答、跟踪 Codex 任务状态，并在需要时回到原始 Codex 任务继续工作。
+
+它不是另一套 AI 服务：PinChat 通过本机 Codex App Server 工作，使用用户已有的 Free、Plus、Pro 或工作区登录与额度，不要求 OpenAI API Key，并跟随本机 Codex 的模型、推理强度、人格和权限配置。
+
+![PinChat：macOS Codex 置顶小窗、桌宠与任务状态助手](docs/assets/social-preview.png)
+
+> [!IMPORTANT]
+> PinChat 目前是开发预览版，交互和数据格式仍可能调整。当前本机构建使用 ad-hoc 签名，尚未提供经过 Apple Developer ID 签名与公证的公开安装包。公开宣传前会继续完成分发签名、安装体验和兼容性验证。
+
+## 为什么做 PinChat
+
+- **少切一次窗口**：在当前桌面直接提问和阅读简短回答。
+- **不错过任务完成**：桌宠同步展示 Codex 任务的思考、等待、完成与失败状态。
+- **仍然属于 Codex**：复杂工作继续在 Codex 主应用中完成，不建立第二套账号、人格或历史系统。
+- **原生 macOS 体验**：置顶、全屏 Space、拖放附件、标准编辑快捷键和系统玻璃材质。
+
+## 项目状态与信任入口
+
+| 项目 | 当前状态 |
+| --- | --- |
+| 稳定性 | 开发预览；适合测试和反馈，不承诺生产级稳定性 |
+| 账号与额度 | 由本机 Codex / ChatGPT 管理；PinChat 不保存密码或 API Key |
+| 遥测 | PinChat 当前不包含自建分析、广告或崩溃上报服务 |
+| 本地数据 | 会话显示副本、窗口偏好、附件缓存和桌宠素材缓存 |
+| 直接网络访问 | 仅在本机无可用桌宠素材时，从 OpenAI 静态资源域名下载后备图集 |
+| 分发 | 当前需从源码构建或使用本机测试包；正式签名与公证待完成 |
+| 官方关系 | 社区项目，与 OpenAI 无隶属或官方认可关系 |
+
+详细说明：
+
+- [隐私与数据说明](docs/PRIVACY.md)
+- [安全策略](SECURITY.md)
+- [架构与信任边界](docs/ARCHITECTURE.md)
+- [后续路线图](ROADMAP.md)
+- [参与贡献](CONTRIBUTING.md)
+- [GitHub 发布与可搜索性清单](docs/PUBLISHING.md)
+
+## 快速开始
+
+系统要求：macOS 14 或更高版本，以及 ChatGPT 桌面应用或可用的 Codex CLI。
+
+```sh
+git clone git@github.com:foolyuyu/PinChat.git
+cd PinChat
+swift test
+./scripts/build-app.sh
+open Release/PinChat.app
+```
+
+默认快捷键为 `⌥⇧Space`。也可以点击桌宠展开输入框，悬停桌宠查看近期 Codex 任务。
+
+如果只是关注项目进展，可以先点击 GitHub 的 **Watch → Releases only**；如果 PinChat 对你有帮助，欢迎 Star、提交 Issue 或参与测试。
 
 ## 核心体验
 
@@ -72,7 +133,8 @@ PinChat 不在仓库中打包官方桌宠二进制素材。运行时会按以下
 系统要求：macOS 14 或更高版本，以及 ChatGPT 桌面应用或可用的 Codex CLI。
 
 ```sh
-cd /Users/foolyuyu/Code/PinChat
+git clone git@github.com:foolyuyu/PinChat.git
+cd PinChat
 swift test
 ./scripts/build-app.sh
 ./scripts/verify-release.sh
@@ -98,6 +160,19 @@ swift test
 - 普通全屏 Space 可置顶；锁屏、登录界面、系统安全窗口和受保护 DRM 画面无法被第三方应用覆盖。
 - 当前构建未公证。如 macOS 阻止首次打开，请在 Finder 中按住 Control 点击应用并选择“打开”。
 - 读取邮件、信息、浏览器数据及部分系统目录仍受 macOS TCC 管理；如任务确实需要，可在 PinChat 设置中打开“完全磁盘访问权限”页面并由用户手动授权。
+
+## 接下来的路线图
+
+PinChat 仍处于开发预览阶段，目前优先推进：
+
+- 完成更多 macOS 与 Codex Desktop 版本的真实环境兼容性测试
+- 提供 Apple Developer ID 签名、公证和更顺畅的安装与升级体验
+- 增加隐私安全的演示视频、浅色/深色截图与正式 GitHub Release
+- 继续改善辅助功能、异常恢复、诊断信息和跨显示模式视觉一致性
+- 根据真实用户反馈决定更多快捷键、本地化及其他 AI 服务扩展
+
+路线图描述方向而非承诺日期；完整计划、候选项与明确非目标见
+[ROADMAP.md](ROADMAP.md)。
 
 ## 2.1 官方桌宠参考记录
 
@@ -198,3 +273,11 @@ v3.17 将回答窗右上角小笔明确为“开始新提问”：当前回答�
 - [Codex Pricing](https://learn.chatgpt.com/docs/pricing)
 - [Codex Pets](https://learn.chatgpt.com/docs/pets)
 - [Codex Sandbox](https://learn.chatgpt.com/docs/sandboxing)
+
+## 许可证与声明
+
+PinChat 源代码采用 [MIT License](LICENSE)。该许可证不授予 OpenAI 商标、
+Codex/ChatGPT 品牌或仓库外第三方素材的任何权利。
+
+PinChat 是独立社区项目，与 OpenAI 无隶属、赞助或官方认可关系。Codex、
+ChatGPT 与 OpenAI 是其各自权利人的商标。
